@@ -362,6 +362,7 @@ static void net_note_peer_version(int playerIdx, unsigned int ver)
 static void NetSnapshotReset(void)
 {
     int i;
+    NetInterpReset();
     s_netSendCounter = 0;
     s_snapshotSeq = 1;
     s_clientInputSeq = 1;
@@ -1040,6 +1041,7 @@ void CloseDirectPlaySession(void)
 
     NetRecvThread_Stop();
     net_close();
+    NetInterpReset();
     DebugLog("Session Closed & Player Destroyed.\n");
 }
 

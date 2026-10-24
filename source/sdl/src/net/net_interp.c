@@ -3,6 +3,7 @@
 #include "sonicr_globals.h"
 #include "platform.h"
 #include <stdint.h>
+#include <string.h>
 
 extern void DeriveGroundState(Player *player);   /* ground_collision.c */
 
@@ -20,6 +21,13 @@ static uint32_t  s_intervalMs[MAX_PLAYERS];
 #define STALE_MS     1000
 #define MIN_INTERVAL 8
 #define MAX_INTERVAL 200
+
+void NetInterpReset(void)
+{
+    memset(s_prev, 0, sizeof(s_prev));
+    memset(s_curr, 0, sizeof(s_curr));
+    memset(s_intervalMs, 0, sizeof(s_intervalMs));
+}
 
 static void snap_capture(NetSnap *s, const Player *p)
 {
@@ -78,7 +86,9 @@ void NetInterpApply(void)
     uint32_t now = platform_get_time_ms();
 
     for (int i = 0; i < MAX_PLAYERS; i++) {
-        if (!s_curr[i].valid) continue;
+        /* A slot may have belonged to a remote player in an earlier race.
+         * Never let its interpolation history overwrite local physics. */
+        if (i == g_localPlayerIndex || !s_curr[i].valid) continue;
 
         Player *p = &g_playerBase[i];
 
