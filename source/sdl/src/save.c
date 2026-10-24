@@ -359,8 +359,13 @@ int LoadGameSettings(void)
     g_fileHandle = fp;
     if (fp != NULL) {
         int buf[40];
-        fRead(buf, 0xa0, 1, fp);
+        size_t count = fRead(buf, sizeof(buf), 1, fp);
         fClose(fp);
+        /* Keep the current settings if an interrupted write left a partial
+         * record. No option or audio state may use the unread stack bytes. */
+        if (count != 1) {
+            return 1;
+        }
         bswap32_arr(buf, 40);
 
         g_difficultyConfig = buf[0];
