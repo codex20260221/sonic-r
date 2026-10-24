@@ -92,8 +92,8 @@ else
 endif
 
 # Software wireframe backend: r_soft_backend.c replaces r_gl_backend.c and
-# render_gl.c (they gate themselves out under the define). No header deps in
-# this Makefile — run `make clean` when toggling.
+# render_gl.c (they gate themselves out under the define). Compiler option
+# changes are not tracked — run `make clean` when toggling.
 SOFT ?= 0
 ifeq ($(SOFT),1)
   SOFT_CFLAGS = -DSONICR_SOFT_RENDER
@@ -134,6 +134,10 @@ RELEASE_LDFLAGS = $(GL_LIBS) -lm $(SDL_LIBS) $(MATCHMAKER_LIBS) $(EXTRA_LDFLAGS)
 RELEASE_OBJS = $(patsubst $(SRCDIR)/%.c, $(RELEASE_BUILDDIR)/%.o, $(CSRC))
 RELEASE_TARGET = $(RELEASE_BUILDDIR)/sonicr
 
+# Let the compiler track each translation unit's headers. Keep development
+# and release dependencies separate, just like their object files.
+DEPS = $(OBJS:.o=.d) $(RELEASE_OBJS:.o=.d)
+
 .PHONY: all clean release release-clean
 
 all: $(TARGET)
@@ -142,11 +146,11 @@ $(TARGET): $(OBJS)
 	$(CC) -o $@ $^ $(LDFLAGS)
 
 $(BUILDDIR)/excluded/%.o: $(SRCDIR)/excluded/%.c | $(BUILDDIR)/excluded
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 
 $(BUILDDIR)/%.o: $(SRCDIR)/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 
 $(BUILDDIR)/excluded:
 	mkdir -p $(BUILDDIR)/excluded
@@ -160,14 +164,18 @@ $(RELEASE_TARGET): $(RELEASE_OBJS)
 	$(CC) -o $@ $^ $(RELEASE_LDFLAGS)
 
 $(RELEASE_BUILDDIR)/excluded/%.o: $(SRCDIR)/excluded/%.c | $(RELEASE_BUILDDIR)/excluded
-	$(CC) $(RELEASE_CFLAGS) -c -o $@ $<
+	$(CC) $(RELEASE_CFLAGS) -MMD -MP -c -o $@ $<
 
 $(RELEASE_BUILDDIR)/%.o: $(SRCDIR)/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(RELEASE_CFLAGS) -c -o $@ $<
+	$(CC) $(RELEASE_CFLAGS) -MMD -MP -c -o $@ $<
 
 $(RELEASE_BUILDDIR)/excluded:
 	mkdir -p $(RELEASE_BUILDDIR)/excluded
 
 release-clean:
 	rm -rf $(RELEASE_BUILDDIR)
+
+# Include after `all` so a generated dependency cannot become the default goal.
+# Missing .d files are expected on the first build; -MP tolerates removed headers.
+-include $(DEPS)
