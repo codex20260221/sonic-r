@@ -30,12 +30,11 @@ def exercise(root, release):
     binary_name = "sonicr.exe" if os.name == "nt" else "sonicr"
     target = build / binary_name
     command = [
-        os.environ.get("MAKE", "make"), "--no-print-directory", "-f", str(MAKEFILE),
-        "SRCDIR=" + str(source),
-        "BUILDDIR=" + str(root / "build"),
-        "RELEASE_BUILDDIR=" + str(root / "build-release"),
-        "TARGET=" + str(root / "build" / binary_name),
-        "RELEASE_TARGET=" + str(root / "build-release" / binary_name),
+        os.environ.get("MAKE", "make"), "--no-print-directory", "-f", MAKEFILE.as_posix(),
+        # Relative forward-slash paths also work with MSYS Make + native Python.
+        "SRCDIR=src", "BUILDDIR=build", "RELEASE_BUILDDIR=build-release",
+        "TARGET=build/" + binary_name,
+        "RELEASE_TARGET=build-release/" + binary_name,
         "CC=" + os.environ.get("CC", "cc"),
         "CFLAGS=-std=c11 -Wall -Wextra -Werror",
         "RELEASE_CFLAGS=-std=c11 -Wall -Wextra -Werror",

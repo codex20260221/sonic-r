@@ -184,12 +184,11 @@ static void expect_failure(size_t length)
     ++cases;
 }
 
-static void expect_success(const unsigned short header[HEADER_WORDS], size_t samples,
-                           size_t length)
+static void expect_loaded(const char *path, const unsigned short header[HEADER_WORDS],
+                          size_t samples, size_t length)
 {
-    write_fixture(length);
     reset_state();
-    check(LoadReplayLog(fixture_path) == 1, "valid replay rejected", length);
+    check(LoadReplayLog(path) == 1, "valid replay rejected", length);
     expect_resources_released();
     check(g_gpDifficultyLevel == 101, "previous difficulty was not saved", length);
     check(g_difficultyConfig == header[6], "difficulty mapping", length);
@@ -206,10 +205,44 @@ static void expect_success(const unsigned short header[HEADER_WORDS], size_t sam
     }
     check(memcmp(players, expected_players, sizeof(players)) == 0,
           "load changed unrelated player fields", length);
-    for (size_t i = 0; i < CAPACITY; ++i)
-        check(g_taGhostSource[i] == (i < samples ? new_frame(i) : old_frame(i)),
+    for (size_t i = 0; i < CAPACITY; ++i) {
+        unsigned short expected = i < samples
+            ? (unsigned short)(fixture[HEADER_BYTES + i * 2] |
+                               (unsigned short)fixture[HEADER_BYTES + i * 2 + 1] << 8)
+            : old_frame(i);
+        check(g_taGhostSource[i] == expected,
               "replay payload or untouched tail", i);
+    }
     ++cases;
+}
+
+static void expect_success(const unsigned short header[HEADER_WORDS], size_t samples,
+                           size_t length)
+{
+    write_fixture(length);
+    expect_loaded(fixture_path, header, samples, length);
+}
+
+static void test_external(const char *path)
+{
+    unsigned short header[HEADER_WORDS];
+    FILE *fp = fopen(path, "rb");
+    check(fp != NULL, "open external replay", 0);
+    size_t length = fread(fixture, 1, sizeof(fixture), fp);
+    check(!ferror(fp) && feof(fp), "external replay exceeds fixture buffer", length);
+    check(fclose(fp) == 0, "close external replay", length);
+    check(length >= HEADER_BYTES, "external replay header", length);
+    for (int i = 0; i < HEADER_WORDS; ++i)
+        header[i] = (unsigned short)(fixture[i * 2] | (unsigned short)fixture[i * 2 + 1] << 8);
+    size_t samples = (size_t)header[0] * header[14];
+    check(samples <= CAPACITY && length == HEADER_BYTES + samples * 2,
+          "external replay declared size", length);
+    expect_loaded(path, header, samples, length);
+    printf("external replay: %s: header=[", path);
+    for (int i = 0; i < HEADER_WORDS; ++i)
+        printf("%s%u", i == 0 ? "" : ",", (unsigned int)header[i]);
+    printf("]: runtime track=%d, frames/viewport=%d, samples=%zu: PASS\n",
+           g_trackId, g_ghostMaxFrames, samples);
 }
 
 static void test_overflow(void)
@@ -381,6 +414,13 @@ static void test_io_failures(void)
 int main(int argc, char **argv)
 {
     const char *which = argc > 1 ? argv[1] : "all";
+    if (strcmp(which, "external") == 0) {
+        check(argc > 2, "external replay paths required", 0);
+        for (int i = 2; i < argc; ++i)
+            test_external(argv[i]);
+        printf("replay loader: %d external cases passed\n", cases);
+        return 0;
+    }
     if (strcmp(which, "all") == 0 || strcmp(which, "overflow") == 0)
         test_overflow();
     if (strcmp(which, "all") == 0 || strcmp(which, "truncated") == 0)

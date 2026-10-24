@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile the real replay loader and run synthetic fixtures without SDL/assets."""
+"""Test the production replay loader with synthetic and optional external demos."""
 
 import argparse
 import os
@@ -19,7 +19,17 @@ def main():
     parser.add_argument("--source", type=Path, default=REPO / "source/sdl/src/save.c")
     parser.add_argument("--sanitize", action="store_true")
     parser.add_argument("--case", choices=("all", "overflow", "truncated", "valid"), default="all")
+    parser.add_argument("--demo-dir", type=Path,
+                        help="also load every .DEM in this external directory (read only)")
     args = parser.parse_args()
+    demos = []
+    if args.demo_dir is not None:
+        if not args.demo_dir.is_dir():
+            parser.error("--demo-dir must be an existing directory")
+        demos = sorted(p.resolve() for p in args.demo_dir.iterdir()
+                       if p.is_file() and p.suffix.lower() == ".dem")
+        if not demos:
+            parser.error("--demo-dir contains no .DEM files")
     sources = [str(REPO / "tests/test_replay.c"), str(args.source.resolve())]
     extra_cflags = shlex.split(os.environ.get("CFLAGS", ""))
     extra_ldflags = shlex.split(os.environ.get("LDFLAGS", ""))
@@ -56,6 +66,8 @@ def main():
             command += extra_cflags + sources + [dead_strip] + extra_ldflags + ["-o", str(binary)]
         subprocess.run(command, cwd=build, check=True)
         subprocess.run([str(binary), args.case], cwd=build, check=True)
+        if demos:
+            subprocess.run([str(binary), "external", *map(str, demos)], cwd=build, check=True)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,20 @@ These checks compile the production `source/sdl/src/save.c` and use synthetic
 replay files. No game assets, SDL libraries, window, audio device, network,
 test framework, or WSL are required.
 
+To additionally check privately supplied PC demos, pass their directory:
+
+```powershell
+python tests/run_replay.py --demo-dir C:\path\to\owned-game\BIN\DEMOS
+python tests/run_replay.py --sanitize --demo-dir C:\path\to\owned-game\BIN\DEMOS
+```
+
+The 257 synthetic cases still run. Each external `.DEM` is opened read only
+at its original path by the production loader. The harness independently
+decodes its little-endian header and payload, checks all published fields,
+track conversion, every sample and the untouched buffer tail, and prints the
+15 header words and frame count. No external asset is copied into the repo.
+An absent/empty demo directory is an error; omit the option for asset-free use.
+
 On native Windows, use an x64 Native Tools prompt for Visual Studio 2022, or
 PowerShell with the MSVC compiler environment loaded:
 
@@ -64,3 +78,21 @@ runner paths were reviewed but not executed in this environment. The
 These subsystem results do not establish original-game equivalence or full
 Windows, macOS, Linux, or Dreamcast build/runtime correctness. See the
 [verification record](../docs/replay-loader-review-2026-10-24.md).
+
+## Other integration regressions
+
+Run from the repository root in an MSYS2 UCRT64 shell (with native Python 3
+on `PATH` for the Makefile check):
+
+```sh
+CC=gcc sh tests/run_settings.sh
+CC=gcc sh tests/run_net_interp.sh
+CC=gcc python tests/test_build_dependencies.py
+```
+
+These cover 168 settings cases, 5 interpolation tests, and development/release
+incremental dependency scenarios. The settings harness supplies unused
+`save.c` globals required by PE/COFF linkers. The dependency harness uses
+relative Makefile variables to work with native Windows Python and MSYS Make.
+See the [Windows integration record](../docs/windows-integration-2026-10-24.md)
+for the fresh build and authentic demo results.

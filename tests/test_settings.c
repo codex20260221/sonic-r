@@ -10,8 +10,7 @@
 
 int LoadGameSettings(void);
 
-/* Only the globals used by LoadGameSettings survive section garbage collection
- * when this harness is linked against the actual save.c translation unit. */
+/* Globals used by LoadGameSettings. */
 FILE *g_fileHandle;
 int g_difficultyConfig, g_ghostToggle, g_weatherConfig, g_catchUpToggle;
 int g_guideToggle, g_minimapConfig, g_splitScreenMode;
@@ -21,6 +20,16 @@ int g_resolutionLevel, g_optCfg_488, g_optCfg_48c, g_doubleWidthFlag;
 int g_stereoEnabled, g_vocalsEnabled, g_optSfxVolume, g_optMusicVolume;
 int g_musicEnabled;
 int g_optCfgRomData[8];
+
+/* PE/COFF linkers can retain references from unused save.c entry points.
+ * Supply their data without replacing any production settings code. */
+int g_raceSpeedMult, g_screenWidth, g_screenHeight;
+int g_gpDifficultyLevel, g_numViewports, g_numPlayers, g_numHumans;
+int g_trackId, g_raceType, g_raceSubMode, g_weatherType, g_timeOfDay;
+int g_ghostMaxFrames, g_replayCharIds[MAX_PLAYERS];
+unsigned short g_taGhostSource[0x8000];
+char g_joystickSlots[4][282];
+Player *g_playerBase;
 
 static int *const fields[] = {
     &g_difficultyConfig, &g_ghostToggle, &g_weatherConfig, &g_catchUpToggle,
