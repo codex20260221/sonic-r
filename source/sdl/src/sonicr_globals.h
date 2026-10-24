@@ -936,7 +936,7 @@ extern int g_vpClipLeft16;
 extern int g_vpClipRight16;
 extern short g_joystickConfigWords[];          /* 0x675404 */
 extern int g_diDeviceReady;          /* 0x675c2c */
-extern unsigned short g_taGhostSource[];          /* 0x91498c */
+extern unsigned short g_taGhostSource[0x8000];    /* 0x91498c — fixed replay capacity */
 extern unsigned short *g_p1JoystickPtr;          /* 0x8fd6f0 */
 extern unsigned short *g_p2JoystickPtr;          /* 0x8fde0c */
 extern unsigned short *g_p3JoystickPtr;          /* 0x8fe528 */

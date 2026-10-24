@@ -180,36 +180,70 @@ static const char *s_demoFiles[] = {
  * Loads a demo/replay file: header fields (numViewports, trackId, raceType,
  * character IDs, ghostMaxFrames) then bulk ghost frame data per viewport.
  * Returns 1 on success, 0 on failure.
+ * Malformed or incomplete files leave the current game/replay state intact.
  *
  * Binary: EAX = filename (passed by caller).
  * Validated against capstone disasm 2026-04-18.
  */
 int LoadReplayLog(const char *filename)
 {
-    g_gpDifficultyLevel = g_difficultyConfig;   /* 0x4DBEE2 */
-
     FILE *fp = fOpen(filename, "rb");       /* EAX=filename, EDX="rb" */
     g_fileHandle = fp;                      /* 0x4DBEF8 */
     if (fp == NULL) {
         return 0;               /* 0x4DBEFF: je epilogue */
     }
 
-    unsigned short val;
-    fRead(&val, 1, 2, fp);
-    bswap16_inplace(&val);
-    g_numViewports = (int)val; /* → 0x6E9910 */
+    /* Nine configuration words, five character IDs, then the frame count.
+     * Read and validate the complete header before publishing any game state. */
+    unsigned short header[15];
+    unsigned short *frames = NULL;
+    size_t sampleCount;
+    const size_t capacity = sizeof(g_taGhostSource) / sizeof(g_taGhostSource[0]);
+    if (fRead(header, sizeof(header), 1, fp) != 1) {
+        goto failed;
+    }
+    bswap16_arr(header, 15);
 
-    fRead(&val, 1, 2, fp);
-    bswap16_inplace(&val);
-    g_numPlayers = (int)val; /* → 0x6E990C */
+    if (header[0] < 1 || header[0] > 4 ||
+        header[1] < 1 || header[1] > MAX_PLAYERS || header[0] > header[1] ||
+        header[2] < 1 || header[2] > header[0] ||
+        header[3] < TRACK_RESORT_ISLAND || header[3] > TRACK_RADIANT_EMERALD ||
+        header[4] > RACE_TYPE_INTERNAL_4 || header[5] > SUBMODE_BALLOON ||
+        header[6] > DIFF_HARD || header[7] > WEATHER_SNOW || header[8] > TOD_NIGHT) {
+        goto failed;
+    }
+    for (int i = 0; i < header[1]; ++i) {
+        if (header[9 + i] >= CHAR_COUNT) {
+            goto failed;
+        }
+    }
 
-    fRead(&val, 1, 2, fp);
-    bswap16_inplace(&val);
-    g_numHumans = (int)val; /* → 0x6E9908 */
+    /* Divide before multiplying so every viewport's block fits the fixed
+     * replay buffer. Empty recordings retain their existing accepted format. */
+    if (header[14] > capacity / header[0]) {
+        goto failed;
+    }
+    sampleCount = (size_t)header[0] * header[14];
+    if (sampleCount != 0) {
+        frames = malloc(sampleCount * sizeof(*frames));
+        if (frames == NULL || fRead(frames, sizeof(*frames), sampleCount, fp) != sampleCount) {
+            goto failed;
+        }
+        bswap16_arr(frames, (int)sampleCount);
+    }
+    if (fError(fp)) {
+        goto failed;
+    }
+    if (fClose(fp) != 0) {
+        free(frames);
+        return 0;
+    }
 
-    fRead(&val, 1, 2, fp);
-    bswap16_inplace(&val);
-    g_trackId = (int)val; /* → 0x8FB8EC */
+    g_gpDifficultyLevel = g_difficultyConfig;   /* 0x4DBEE2 */
+    g_numViewports = (int)header[0]; /* → 0x6E9910 */
+    g_numPlayers = (int)header[1];   /* → 0x6E990C */
+    g_numHumans = (int)header[2];    /* → 0x6E9908 */
+    g_trackId = (int)header[3];      /* → 0x8FB8EC */
 
     /* Demo headers store trackId in the ORIGINAL convention (Factory=3, Ruin=4);
      * our runtime uses Ruin=3, Factory=4. Convert the swapped 3/4 pair — this is
@@ -223,68 +257,33 @@ int LoadReplayLog(const char *filename)
         g_trackId = 3;
     }
 
-    fRead(&val, 1, 2, fp);
-    bswap16_inplace(&val);
-    g_raceType = (int)val; /* → 0x8FB950 */
-
-    fRead(&val, 1, 2, fp);
-    bswap16_inplace(&val);
-    g_raceSubMode = (int)val; /* → 0x8FB954 */
-
-    fRead(&val, 1, 2, fp);
-    bswap16_inplace(&val);
-    g_difficultyConfig = (int)val; /* → 0x8FD444 */
-
-    fRead(&val, 1, 2, fp);
-    bswap16_inplace(&val);
-    g_weatherType = (int)val; /* → 0x94BCF4 */
-
-    fRead(&val, 1, 2, fp);
-    bswap16_inplace(&val);
-    g_timeOfDay = (int)val; /* → 0x94BCF8 */
+    g_raceType = (int)header[4];         /* → 0x8FB950 */
+    g_raceSubMode = (int)header[5];      /* → 0x8FB954 */
+    g_difficultyConfig = (int)header[6]; /* → 0x8FD444 */
+    g_weatherType = (int)header[7];      /* → 0x94BCF4 */
+    g_timeOfDay = (int)header[8];        /* → 0x94BCF8 */
 
     /* Per-player character IDs — binary writes both to player struct charId
      * (word) and to g_replayCharIds[] (sign-extended dword). 0x4DC054-0x4DC128 */
-    fRead(&val, 1, 2, fp);
-    bswap16_inplace(&val);
-    g_playerBase[0].charId = (short)val;  /* → 0x8FD5E6 */
-    g_replayCharIds[0] = (int)(short)val; /* → 0x8FB980 */
-
-    fRead(&val, 1, 2, fp);
-    bswap16_inplace(&val);
-    g_playerBase[1].charId = (short)val;  /* → 0x8FDD02 */
-    g_replayCharIds[1] = (int)(short)val; /* → 0x8FB984 */
-
-    fRead(&val, 1, 2, fp);
-    bswap16_inplace(&val);
-    g_playerBase[2].charId = (short)val;  /* → 0x8FE41E */
-    g_replayCharIds[2] = (int)(short)val; /* → 0x8FB988 */
-
-    fRead(&val, 1, 2, fp);
-    bswap16_inplace(&val);
-    g_playerBase[3].charId = (short)val;  /* → 0x8FEB3A */
-    g_replayCharIds[3] = (int)(short)val; /* → 0x8FB98C */
-
-    fRead(&val, 1, 2, fp);
-    bswap16_inplace(&val);
-    g_playerBase[4].charId = (short)val;  /* → 0x8FF256 */
-    g_replayCharIds[4] = (int)(short)val; /* → 0x8FB990 */
-
-    fRead(&val, 1, 2, fp);
-    bswap16_inplace(&val);
-    g_ghostMaxFrames = (int)val; /* → 0x901CE0 */
+    for (int i = 0; i < MAX_PLAYERS; ++i) {
+        g_playerBase[i].charId = (short)header[9 + i]; /* 0x8FD5E6 + i*0x71C */
+        g_replayCharIds[i] = (int)(short)header[9 + i]; /* 0x8FB980 + i*4 */
+    }
+    g_ghostMaxFrames = (int)header[14]; /* → 0x901CE0 */
 
     /* Bulk ghost frame data — one block of ghostMaxFrames × 2 bytes per viewport.
      * Binary loop at 0x4DC14C: fread(g_ghostReplayBuffer + vp*ghostMaxFrames*2,
      *                                ghostMaxFrames, 2, fp) */
-    for (int i = 0; i < g_numViewports; i++) {
-        unsigned short *dest = g_taGhostSource + i * g_ghostMaxFrames;
-        fRead(dest, g_ghostMaxFrames, 2, fp);               /* 0x4DC16A */
-        bswap16_arr(dest, g_ghostMaxFrames);
+    if (sampleCount != 0) {
+        memcpy(g_taGhostSource, frames, sampleCount * sizeof(*frames));
     }
-
-    fClose(fp);                                             /* 0x4DC17C */
+    free(frames);
     return 1;                                               /* 0x4DC181 */
+
+failed:
+    fClose(fp);
+    free(frames);
+    return 0;
 }
 
 static int g_demoCycleIndex;
