@@ -96,3 +96,18 @@ incremental dependency scenarios. The settings harness supplies unused
 relative Makefile variables to work with native Windows Python and MSYS Make.
 See the [Windows integration record](../docs/windows-integration-2026-10-24.md)
 for the fresh build and authentic demo results.
+
+## Network delta codec
+
+```powershell
+python tests/run_net_delta.py
+python tests/run_net_delta.py --sanitize
+```
+
+Or use `--cc gcc` in UCRT64. The 140 cases cover all truncation points in
+representative keyframes, multi-field relative deltas and overflow-submask
+deltas; unchanged destination/history on failure; retransmission; missing
+history; signed values; staged publication; and literal valid wire fixtures.
+`--source path/to/net_delta.c --case atomic` can reproduce the pre-fix history
+corruption using an exported baseline. `--case valid` checks four golden
+wire/missing-history cases without depending on the new staging API.

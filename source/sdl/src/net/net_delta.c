@@ -226,6 +226,7 @@ int net_delta_decode(NetDeltaRecvState *s, const unsigned char *buf,
                      int len, int is_keyframe, Player *pl)
 {
     int i, cursor;
+    NetDeltaRecvState pending;
 
     if (len < 1) return 0;
     /* buf[0] is playerIdx — caller reads it, we skip past */
@@ -237,12 +238,12 @@ int net_delta_decode(NetDeltaRecvState *s, const unsigned char *buf,
         for (i = 0; i < NET_DELTA_FIELD_COUNT; i++) {
             const FieldDef *f = &s_fields[i];
             if (f->flags & FLAG_SIGNED)
-                s->state[i] = read_le_signed(buf + cursor, f->abs_width);
+                pending.state[i] = read_le_signed(buf + cursor, f->abs_width);
             else
-                s->state[i] = read_le_unsigned(buf + cursor, f->abs_width);
+                pending.state[i] = read_le_unsigned(buf + cursor, f->abs_width);
             cursor += f->abs_width;
         }
-        s->valid = 1;
+        pending.valid = 1;
     } else {
         unsigned char mask[NET_DELTA_MASK_BYTES];
         int has_overflow;
@@ -250,6 +251,7 @@ int net_delta_decode(NetDeltaRecvState *s, const unsigned char *buf,
 
         if (!s->valid)
             return 0;
+        pending = *s;
         if (len < 1 + NET_DELTA_MASK_BYTES)
             return 0;
 
@@ -274,7 +276,7 @@ int net_delta_decode(NetDeltaRecvState *s, const unsigned char *buf,
                 int sbit = delta_submask_bit(i);
                 if (sbit >= 0 && ((submask[sbit / 8] >> (sbit % 8)) & 1)) {
                     if (cursor + f->abs_width > len) return 0;
-                    s->state[i] = (f->flags & FLAG_SIGNED)
+                    pending.state[i] = (f->flags & FLAG_SIGNED)
                         ? read_le_signed(buf + cursor, f->abs_width)
                         : read_le_unsigned(buf + cursor, f->abs_width);
                     cursor += f->abs_width;
@@ -285,23 +287,30 @@ int net_delta_decode(NetDeltaRecvState *s, const unsigned char *buf,
             if (f->flags & FLAG_DELTA) {
                 if (cursor + f->delta_width > len) return 0;
                 int delta = read_le_signed(buf + cursor, f->delta_width);
-                s->state[i] += delta;
+                pending.state[i] += delta;
                 cursor += f->delta_width;
             } else {
                 if (cursor + f->abs_width > len) return 0;
                 if (f->flags & FLAG_SIGNED)
-                    s->state[i] = read_le_signed(buf + cursor, f->abs_width);
+                    pending.state[i] = read_le_signed(buf + cursor, f->abs_width);
                 else
-                    s->state[i] = read_le_unsigned(buf + cursor, f->abs_width);
+                    pending.state[i] = read_le_unsigned(buf + cursor, f->abs_width);
                 cursor += f->abs_width;
             }
         }
     }
 
-    for (i = 0; i < NET_DELTA_FIELD_COUNT; i++)
-        write_field(pl, &s_fields[i], s->state[i]);
-
+    /* All fields are present: publish history and optional destination together. */
+    *s = pending;
+    if (pl != NULL)
+        net_delta_apply(s, pl);
     return cursor;
+}
+
+void net_delta_apply(const NetDeltaRecvState *s, Player *pl)
+{
+    for (int i = 0; i < NET_DELTA_FIELD_COUNT; i++)
+        write_field(pl, &s_fields[i], s->state[i]);
 }
 
 _Static_assert(offsetof(Player, posX)            == 0x000, "net_delta posX");

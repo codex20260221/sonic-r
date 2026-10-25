@@ -25,7 +25,12 @@ int net_delta_encode(NetDeltaSendState *s, const Player *pl,
                      int playerIdx, int is_keyframe,
                      unsigned char *buf, int maxlen);
 
+/* Returns bytes consumed, or zero without changing history or player on
+ * incomplete input. A NULL player stages history without publishing fields. */
 int net_delta_decode(NetDeltaRecvState *s, const unsigned char *buf,
                      int len, int is_keyframe, Player *pl);
+
+/* Publish a successfully decoded history, leaving unrelated player fields intact. */
+void net_delta_apply(const NetDeltaRecvState *s, Player *pl);
 
 #endif
