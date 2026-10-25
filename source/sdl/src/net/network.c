@@ -293,7 +293,10 @@ static DWORD s_hostSlotLastRecvMs[NET_MAX_PLAYERS] = {0};
 static int      s_netSendCounter;
 static uint16_t s_snapshotSeq;
 static uint16_t s_clientInputSeq;
-static uint16_t s_lastRecvInputSeq[4];
+static uint16_t s_lastRecvInputSeq[NET_MAX_PLAYERS];
+/* Input-only packets may advance input freshness without repairing a missing
+ * state packet. Track the contiguous baseline separately for each client. */
+static uint16_t s_lastRecvInputStateSeq[NET_MAX_PLAYERS];
 static uint16_t s_lastRecvSnapSeq;
 
 static NetDeltaSendState s_deltaSend[NET_MAX_PLAYERS];
@@ -368,6 +371,7 @@ static void NetSnapshotReset(void)
     s_clientInputSeq = 1;
     s_lastRecvSnapSeq = 0;
     memset(s_lastRecvInputSeq, 0, sizeof(s_lastRecvInputSeq));
+    memset(s_lastRecvInputStateSeq, 0, sizeof(s_lastRecvInputStateSeq));
     for (i = 0; i < NET_MAX_PLAYERS; i++) {
         net_delta_reset_send(&s_deltaSend[i]);
         net_delta_reset_recv(&s_deltaRecv[i]);
@@ -613,7 +617,18 @@ static int net_apply_snapshot(const char *buf, int len)
     if (len < SNAP_HEADER_SIZE) return 0;
     uint16_t seq = rl16u(buf + 4);
     if ((int16_t)(seq - s_lastRecvSnapSeq) <= 0) return 0;
+    uint16_t distance = (uint16_t)(seq - s_lastRecvSnapSeq);
+    if (!(buf[9] & 1) && distance != 1) return 0;
     if (!net_decode_snapshot(buf, len, &pending)) return 0;
+
+    /* A keyframe can bridge a gap, but only the slots actually present have
+     * recovered baselines. Omitted slots must not reuse pre-loss history. */
+    if ((buf[9] & 1) && distance != 1) {
+        unsigned int present = 0;
+        for (int i = 0; i < pending.count; ++i) present |= 1u << pending.slots[i];
+        for (int i = 0; i < NET_MAX_PLAYERS; ++i)
+            if (!(present & (1u << i))) s_deltaRecv[i].valid = 0;
+    }
 
     /* No operation below can reject the packet. Commit all slots in wire order
      * so finish-order ties retain their existing behavior. */
@@ -1854,12 +1869,18 @@ void ApplyNetworkPlayerState(void)
                     /* The body has its own slot byte. Require agreement and
                      * complete consumption before committing even the input. */
                     if ((unsigned char)buf[12] != playerIdx) continue;
+                    if (!(buf[9] & 1) &&
+                        (uint16_t)(seq - s_lastRecvInputStateSeq[playerIdx]) != 1) continue;
                     pending = s_deltaRecv[playerIdx];
                     int consumed = net_delta_decode(&pending,
                                         (const unsigned char *)buf + 12,
                                         len - 12, buf[9] & 1, NULL);
                     if (consumed == 0 || consumed != len - 12) continue;
                 }
+                /* Contiguous input-only packets account for an unchanged
+                 * baseline; a gap in that form cannot hide lost state data. */
+                if (len > 12 || (uint16_t)(seq - s_lastRecvInputStateSeq[playerIdx]) == 1)
+                    s_lastRecvInputStateSeq[playerIdx] = seq;
 #endif
                 s_lastRecvInputSeq[playerIdx] = seq;
                 s_netInputBuffer[playerIdx] = inputBits;

@@ -9,6 +9,7 @@ static DWORD fixture_time(void) { return now_ms; }
 #include "../source/sdl/src/net/net_interp.c"
 
 static int host, cases, packet_ready, incoming_len;
+static int incoming_slot;
 static char incoming[NET_MAX_PACKET];
 static Player source_players[NET_MAX_PLAYERS];
 static NetDeltaSendState send_states[NET_MAX_PLAYERS];
@@ -26,7 +27,7 @@ int net_recv(void *buf, int maxlen, int *from_slot)
     if (!packet_ready) return 0;
     CHECK(incoming_len <= maxlen);
     memcpy(buf, incoming, (size_t)incoming_len);
-    *from_slot = host ? 1 : 0;
+    *from_slot = incoming_slot;
     packet_ready = 0;
     return incoming_len;
 }
@@ -106,6 +107,7 @@ static void dispatch(const char *packet, int len)
 static void reset_fixture(int is_host)
 {
     host = is_host;
+    incoming_slot = is_host ? 1 : 0;
     now_ms = 1000;
     NetSnapshotReset();
     memset(g_playerBase, 0, sizeof(Player) * MAX_PLAYERS);

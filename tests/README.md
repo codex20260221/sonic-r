@@ -143,3 +143,36 @@ history and finish bookkeeping unchanged.
 `libasan`, so packet sanitizer coverage is not claimed. MSVC ASan covers the
 codec separately. These tests do not test real transport or concurrency.
 See [network receive verification](../docs/network-receive-2026-10-24.md).
+
+## Loss, duplication and reordering
+
+```sh
+python tests/run_net_loss.py --cc gcc
+CFLAGS=-fanalyzer python tests/run_net_loss.py --cc gcc
+python tests/run_net_loss.py --cc gcc --case profile
+```
+
+The isolated delivery harness reuses the production packet receiver and actual
+snapshot sender, the production input codec with its existing envelope, and the
+prior transaction fixture. It opens no sockets. The 95 scenarios / 8,815
+deliveries cover all 31 loss phases, isolated/burst loss, lost initial/periodic
+and consecutive keyframes, duplicates, reordering with/without retransmission,
+stale and malformed packets, wraparound, independently sequenced clients,
+input-only packets, and partial keyframe recovery. Accepted state is compared
+with an uninterrupted authoritative decode; rejected state is compared byte
+for byte with its pre-delivery state.
+
+To reproduce the failure without changing branches:
+
+```powershell
+python -c 'from pathlib import Path; import subprocess; p=Path("source/sdl/build/loss-evidence/baseline-network.c"); p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(subprocess.check_output(["git","show","5193ef1:source/sdl/src/net/network.c"]))'
+```
+
+```sh
+python tests/run_net_loss.py --cc gcc --source source/sdl/build/loss-evidence/baseline-network.c --case profile
+```
+
+The baseline profile deliberately exits nonzero after reporting corruption.
+Baseline and repaired profile sender fingerprints must match. See the
+[recovery record](../docs/network-loss-2026-10-24.md) for exact measurements,
+conditional recovery bounds and compatibility limitations.

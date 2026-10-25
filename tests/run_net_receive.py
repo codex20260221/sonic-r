@@ -11,13 +11,14 @@ import tempfile
 REPO = Path(__file__).resolve().parents[1]
 
 
-def main():
+def main(harness="receive"):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cc", default=os.environ.get("CC", "gcc" if os.name == "nt" else "cc"))
     parser.add_argument("--source", type=Path, default=REPO / "source/sdl/src/net/network.c")
     parser.add_argument("--delta-source", type=Path, default=REPO / "source/sdl/src/net/net_delta.c")
-    parser.add_argument("--case", choices=("all", "snapshot", "input", "valid",
-                                          "snapshot-late", "decoder"), default="all")
+    choices = (("all", "profile", "snapshot", "input", "edges") if harness == "loss" else
+               ("all", "snapshot", "input", "valid", "snapshot-late", "decoder"))
+    parser.add_argument("--case", choices=choices, default="all")
     parser.add_argument("--sanitize", action="store_true")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="sonicr-receive-") as temporary:
@@ -33,7 +34,8 @@ def main():
         if args.sanitize:
             command += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
         command += shlex.split(os.environ.get("CFLAGS", ""))
-        command += [str(REPO / "tests/test_net_receive.c"), str(args.delta_source.resolve()),
+        test_source = "test_net_loss.c" if harness == "loss" else "test_net_receive.c"
+        command += [str(REPO / "tests" / test_source), str(args.delta_source.resolve()),
                     str(REPO / "source/sdl/src/globals.c"),
                     str(REPO / "source/sdl/src/globals_extra.c"), dead_strip]
         command += shlex.split(os.environ.get("LDFLAGS", "")) + ["-o", str(binary)]
