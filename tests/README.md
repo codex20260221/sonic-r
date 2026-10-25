@@ -97,6 +97,42 @@ relative Makefile variables to work with native Windows Python and MSYS Make.
 See the [Windows integration record](../docs/windows-integration-2026-10-24.md)
 for the fresh build and authentic demo results.
 
+## Terrain loader
+
+Run in UCRT64 with GCC, or a compatible POSIX compiler:
+
+```sh
+python tests/run_terrain.py --cc gcc
+CFLAGS=-fanalyzer python tests/run_terrain.py --cc gcc
+```
+
+For Windows AddressSanitizer, use an x64 MSVC developer environment:
+
+```powershell
+python tests/run_terrain.py --cc cl --sanitize
+python tests/run_terrain.py --cc cl --sanitize --terrain-dir "$env:SONICR_DATA_DIR/BIN/EXTRAS"
+```
+
+The optional directory supplies external `.TER` files read-only. No original
+assets are required by the 2,500 synthetic cases. They cover the 80,493-byte
+overflow, exact capacity, every shorter length of a 2,360-byte fixture, invalid
+offsets/counts/alignment, face/wall/loop/grid/item references, fixed animation
+item groups, invalid grid dimensions, parse-before-load, reloads and I/O failures.
+Valid files retain their bytes and published pointers/scalars; invalid files
+must take the failure-exit path before publishing invalid metadata. A rejected
+load terminates the game; the checks do not imply rollback of partially read
+buffer contents.
+
+GCC and MSVC compile the complete production `track_load.c`. Unrelated
+renderer/audio entry points have aborting stubs for PE/COFF linking. MSVC uses
+a test-only shim for GNU attributes; production declarations are unchanged.
+The harness forwards real stdio calls, injects deterministic I/O errors and
+intercepts failure exits. Fixtures and binaries use temporary directories.
+`--source` selects an exported production baseline; `--case overflow --sanitize`
+reproduces the original write with MSVC ASan, while `--case valid` checks accepted
+files independently of the new validation. See the
+[terrain audit record](../docs/terrain-loading-2026-10-25.md).
+
 ## Network delta codec
 
 ```powershell

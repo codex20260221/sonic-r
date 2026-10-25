@@ -21,7 +21,8 @@ extern void R_SetTpageRGBA8(int tpage, unsigned char *rgba);
 
 static int ReadLE32(const void *p) {
     const unsigned char *b = (const unsigned char *)p;
-    return (int)(b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24));
+    return (int32_t)((uint32_t)b[0] | ((uint32_t)b[1] << 8) |
+                     ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24));
 }
 
 #include "sonicr_paths.h"
@@ -39,6 +40,110 @@ extern int g_terCollisionMeshSize;
 /* Static buffer for .TER file data — largest is ISLAND.TER at 80,492 bytes. */
 static uint32_t __attribute__((aligned(32))) s_terRawStorage[20123];  /* 80,492 bytes */
 static void *s_terRawBuffer = s_terRawStorage;
+static size_t s_terRawSize;
+
+static _Noreturn void TerrainLoadError(const char *reason)
+{
+    /* InitLevel has no recoverable asset-load failure path. Continuing would
+     * use partial terrain or the preceding track's tables. */
+    fprintf(stderr, "Terrain load failed: %s\n", reason);
+    exit(EXIT_FAILURE);
+}
+
+static unsigned int TerrainLE16(const unsigned char *p)
+{
+    return (unsigned int)p[0] | ((unsigned int)p[1] << 8);
+}
+
+/* Validate before publishing pointers or performing in-place BE fixups.
+ * Counts describe records; consecutive offsets may include alignment padding.
+ * Runtime collision/rendering code trusts these references, so check them once
+ * here rather than adding branches to per-frame terrain queries. */
+static int TerrainIsValid(const unsigned char *data, size_t size)
+{
+    static const int strides[10] = {6, 14, 16, 16, 6, 22, 34, 2, 2, 12};
+    /* UpdateTrackWorld_* calls AnimateTrackGeometry with these fixed groups;
+     * Ruin ground collision also reads item entries 0 and 1 directly. */
+    static const int minimumItems[6] = {0, 2, 3, 2, 3, 2};
+    size_t offsets[11];
+    int counts[10];
+    if (size < 92) return 0;
+    for (int i = 0; i < 10; ++i) {
+        int offset = ReadLE32(data + i * 4);
+        if (offset < 92 || (size_t)offset > size || (offset & 1) ||
+            (i != 0 && (size_t)offset < offsets[i - 1])) return 0;
+        offsets[i] = (size_t)offset;
+    }
+    if ((offsets[2] & 3) || (offsets[3] & 3)) return 0;
+    offsets[10] = size;
+    for (int i = 0; i < 10; ++i) {
+        counts[i] = i == 7 ? 1024 : ReadLE32(data + 40 + (i < 7 ? i : i - 1) * 4);
+        if (counts[i] < 0 || (size_t)counts[i] >
+            (offsets[i + 1] - offsets[i]) / strides[i]) return 0;
+    }
+    if (g_trackId < TRACK_RESORT_ISLAND || g_trackId > TRACK_RADIANT_EMERALD ||
+        counts[9] < minimumItems[g_trackId]) return 0;
+
+    /* Grid bounds must be representable by the original 12-bit fixed-point
+     * position arithmetic, and cell dimensions are used as divisors. */
+    for (int axis = 0; axis < 2; ++axis) {
+        int origin = ReadLE32(data + 76 + axis * 4);
+        int cell = ReadLE32(data + 84 + axis * 4);
+        int64_t end = (int64_t)origin + (int64_t)cell * 32 - 1;
+        if (cell <= 0 || origin < INT32_MIN / 4096 || end > INT32_MAX / 4096) return 0;
+    }
+    for (int i = 0; i < counts[1]; ++i) {
+        const unsigned char *face = data + offsets[1] + i * 14;
+        for (int j = 0; j < 4; ++j) {
+            unsigned int vertex = TerrainLE16(face + j * 2);
+            if (vertex % 6 || vertex / 6 >= (unsigned int)counts[0]) return 0;
+        }
+    }
+    for (int i = 0; i < counts[2]; ++i) {
+        const unsigned char *surface = data + offsets[2] + i * 16;
+        int first = (int16_t)TerrainLE16(surface);
+        int count = (int16_t)TerrainLE16(surface + 2);
+        if (first < 0 || count <= 0 || first > counts[1] - count) return 0;
+    }
+    for (int i = 0; i < counts[3]; ++i) {
+        const unsigned char *wall = data + offsets[3] + i * 16;
+        int first = (int16_t)TerrainLE16(wall);
+        int count = wall[2];
+        if (first < 0 || count < 2 || first > counts[4] - count) return 0;
+    }
+    for (int i = 0; i < counts[5]; ++i) {
+        const unsigned char *loop = data + offsets[5] + i * 22;
+        int first = (int16_t)TerrainLE16(loop);
+        int count = (int16_t)TerrainLE16(loop + 2);
+        int forward = (int16_t)TerrainLE16(loop + 4);
+        int reverse = (int16_t)TerrainLE16(loop + 6);
+        int range = (int16_t)TerrainLE16(loop + 18);
+        if (first < 0 || count <= 0 || first > counts[6] - count ||
+            range <= 0 || range > count || forward < 0 || forward > counts[2] - range ||
+            reverse < range - 1 || reverse >= counts[2] ||
+            (int16_t)TerrainLE16(loop + 14) <= 0 ||
+            (int16_t)TerrainLE16(loop + 16) <= 0) return 0;
+    }
+    for (int cell = 0; cell < 1024; ++cell) {
+        int index = (int16_t)TerrainLE16(data + offsets[7] + cell * 2);
+        if (index < 0 || index >= counts[8]) return 0;
+        if (TerrainLE16(data + offsets[8] + index * 2) == 0xffff) continue;
+        for (;;) {
+            if (index >= counts[8]) return 0;
+            unsigned int entry = TerrainLE16(data + offsets[8] + index++ * 2);
+            if ((entry & 0xfff) >= (unsigned int)counts[(entry & 0x4000) ? 3 : 2]) return 0;
+            if (entry & 0x8000) break;
+        }
+    }
+    for (int i = 0; i < counts[9]; ++i) {
+        const unsigned char *item = data + offsets[9] + i * 12;
+        int first = (int16_t)TerrainLE16(item);
+        int second = (int16_t)TerrainLE16(item + 2);
+        if (first < 0 || first >= counts[3] ||
+            (second != -1 && (second < 0 || second >= counts[3]))) return 0;
+    }
+    return 1;
+}
 
 /**
  * LoadTerrain — 0x0042A3F8 — 81 bytes
@@ -52,22 +157,23 @@ void LoadTerrain(void)
         PATH_FACTORY_TER, PATH_EMERALD_TER
     };
 
-    if (g_trackId < TRACK_RESORT_ISLAND || g_trackId > TRACK_RADIANT_EMERALD) {
-        return;
-    }
+    s_terRawSize = 0;
+    if (g_trackId < TRACK_RESORT_ISLAND || g_trackId > TRACK_RADIANT_EMERALD)
+        TerrainLoadError("invalid track");
     FILE *fp = fOpen(s_terPaths[g_trackId], "rb");
-    if (fp == NULL) {
-        return;
-    }
+    if (fp == NULL) TerrainLoadError("cannot open terrain file");
 
-    /* Read entire file into buffer */
-    fSeek(fp, 0, SEEK_END);
-    long size = fTell(fp);
-    fSeek(fp, 0, SEEK_SET);
+    /* Bound the signed file length before converting it to fread's size_t. */
+    int ok = (fSeek(fp, 0, SEEK_END) == 0);
+    long size = ok ? fTell(fp) : -1;
+    ok = ok && size >= 92 && (unsigned long)size <= sizeof(s_terRawStorage);
+    if (ok) ok = (fSeek(fp, 0, SEEK_SET) == 0);
 
     s_terRawBuffer = s_terRawStorage;
-    fRead(s_terRawBuffer, 1, size, fp);
-    fClose(fp);
+    if (ok) ok = (fRead(s_terRawBuffer, 1, (size_t)size, fp) == (size_t)size && !fError(fp));
+    if (fClose(fp) != 0) ok = 0;
+    if (!ok) TerrainLoadError("invalid size or incomplete read");
+    s_terRawSize = (size_t)size;
 }
 
 /**
@@ -80,6 +186,8 @@ void LoadTerrain(void)
  */
 void ParseTerrainHeader(void)
 {
+    if (!TerrainIsValid((const unsigned char *)s_terRawBuffer, s_terRawSize))
+        TerrainLoadError("invalid terrain tables");
     char *base = (char *)s_terRawBuffer;
     char *hdr = base;
 
