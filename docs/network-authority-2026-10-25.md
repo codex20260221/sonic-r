@@ -1,9 +1,10 @@
 # Network sender authority and host resilience — 2026-10-25
 
 The baseline is `c75c79a` on `main`, after the terrain runtime verification.
-This audit uses synthetic fixtures and local loopback only. Original assets,
-private configuration and raw diagnostic evidence are outside Git. Existing
-receive/loss regression work is retained.
+Automated tests use synthetic fixtures and local loopback only. The later
+Windows gameplay check below uses two instances on the same computer.
+Original assets, private configuration and raw diagnostic evidence are outside
+Git. Existing receive/loss regression work is retained.
 
 ## Findings established against the baseline
 
@@ -168,6 +169,124 @@ confirmed defects:
   rate limiting, exhaustive concurrency interleavings and thread sanitization
   also remain unverified.
 - MSVC supplies AddressSanitizer coverage, not UBSan or ThreadSanitizer.
-  Other operating systems and Dreamcast were not built or run. No external
-  network, matchmaking service or new manual two-game race was exercised.
-  The earlier Windows LAN gameplay observation predates this patch.
+  Other operating systems and Dreamcast were not built or run. The automated
+  audit did not exercise external peers or matchmaking. Subsequent Windows
+  gameplay results and their limitations are recorded below.
+
+## Live Windows verification of `c531071`
+
+The checkout was clean on `main` at `c531071`. The UCRT64 development executable
+was current according to Make; both launcher-created copies matched its
+SHA-256. The existing `tests/windows_lan.ps1` setup reused separate private
+runtime copies and launched both instances with `--lan`. The user operated
+the windows while process status and paired development logs were monitored.
+
+The completed race used this computer's own LAN-interface address. Subsequent
+lobby and departure/rejoin checks used direct `127.0.0.1`. All participating
+game processes were on the same computer; no remote peer or public matchmaking
+was involved. Completed-race coverage is for the local LAN address; direct
+loopback coverage in this run is for lobby and departure/rejoin behavior.
+
+| Check | Observed result |
+| --- | --- |
+| Host creation and client joining | Pass; two-player connection and slot 1 assignment confirmed in paired logs |
+| Race initiation and synchronization | Pass for the completed race; START ACK mask `0x3`, expected `0x3`, one retry; READY/GO and game-loop entry confirmed |
+| Independent movement in both directions | User confirmed both directions worked as expected |
+| Complete multiplayer race | User completed Resort Island with Sonic and Tails; gameplay worked as expected |
+| Normal race-session closure | Both logs recorded session closure after the completed race; both processes remained responsive |
+| Client departure and rejoin without restarting the host | Pass twice in the direct-loopback lobby; host received LEAVE, released slot 1, then reused slot 1 for the rejoining client, with no host close/recreation between those events |
+| Host idle timeout, lobby recreation and another join | Fail; duplicate client entries and a subsequent black-screen startup stall, detailed below |
+| Test-process shutdown | Both owned windows closed through the launcher's normal close request and exited with code 0; no forced termination was needed |
+
+The user corrected the initial name report: on the host, the joining client's
+name was present (the underscore in the synthetic name displayed as an `a`),
+while the host's own name was blank. The joining screen showed no names until
+the host started; Windows platform icons were visible. Paired logs contained
+the intended raw names. This lobby display issue remains unresolved. Source
+review finds that the client lobby player count is not populated by SLOT_ASSIGN
+and the local name uses a separate portrait buffer; those paths predate the
+authority patch. No baseline GUI comparison was performed, so this is not a
+claim that every part of the display problem has been isolated.
+
+### Confirmed idle-timeout lifecycle failure
+
+After successful departure/rejoin, the host lobby returned to the title screen
+while the client remained waiting. The user re-established the host lobby,
+left on the client, and joined again. The host then displayed itself and two
+copies of the client. Starting this session left both windows black.
+
+The host log establishes the state mismatch:
+
+- The subsequent client was assigned slot 2 and `playerCount=3`.
+- START acknowledgement stopped at `0x5`, with expected mask `0x7` and 50 retries.
+- The level barrier expected `0x7`; slot 2 repeatedly reported ready, leaving
+  the mask at `0x5`. Slot 1 was an absent participant retained by the host.
+
+Both processes continued responding to window events. Neither log emitted a
+fatal error, crash, disconnect or timeout diagnostic for this stall. Process
+liveness and clean logs therefore did not establish successful startup.
+
+The source trace explains how the stale slot can survive: `NetworkScreen()`
+and `NetworkScreenReentry()` implement a 180-second idle return to the title
+without the `CloseDirectPlaySession()` call used by Esc. Lobby entry resets
+`g_netPlayerCount`, but `net_host_start()` returns success for an already active
+host without clearing its peer table. A fresh client endpoint can then occupy
+another slot. START and the loading barrier wait for the retained endpoint too.
+The relevant timeout/menu paths predate `c531071`; this run establishes the
+failure in `c531071`, without an older-build gameplay comparison.
+
+Broad session-lifecycle resilience is **not closed**. The immediate follow-up
+is to close abandoned lobby sessions consistently, preserve the successful
+lobby-to-race handoff, and add a timeout/re-entry regression before repeating
+this live scenario. The clean LEAVE/rejoin path and normal completed race are
+verified separately from this failed path. No production fix was made during
+this verification pass.
+
+### Original-runtime integrity and verification limits
+
+All 496 original runtime file paths, lengths, SHA-256 hashes and write timestamps
+matched the pre-launch manifest afterward: no added, removed or changed files.
+The total remained 638,606,097 bytes. Only the prepared copies were writable
+game directories. Raw logs, process samples, launch metadata and hash manifests
+remain outside Git. Both test processes were stopped and their UDP endpoints
+were released.
+
+No synthetic regression suite was repeated in this documentation pass. The
+previous automated results above remain the evidence for packet rejection and
+authority checks; this live run used legitimate traffic and does not prove
+spoofing resistance or downstream field safety. The Windows build currency
+check passed. No game assets or production source were modified.
+
+## Candidates for the downstream decoded-field audit
+
+After the lobby lifecycle defect is addressed, these are the most promising
+focused entry points. They are investigation leads, not newly reproduced
+vulnerabilities; no changes or hostile-value runtime tests were made here.
+
+1. **Coordinates and interpolation arithmetic.** Trace decoded positions through
+   `net_delta_apply()`, `NetInterpRecord()`, `lerp_int()` in `net/net_interp.c`,
+   and `DeriveGroundState()` in `ground_collision.c`. Coordinate differences
+   are formed before widening in interpolation, and terrain/projection callers
+   perform further signed arithmetic. Existing grid bounds checks must be
+   retained. Start with synthetic extreme and valid coordinate pairs and verify
+   reachability and original integer semantics before selecting a correction.
+2. **Animation transitions and cursor validity.** `main.c` calls
+   `TickPlayerAnimation()` for remote players even when their physics is
+   skipped. Review decoded `animId`, `abilityState`, grounded/vehicle flags,
+   forward/lateral speed and their interactions with `prevAnimId`, character
+   changes and `g_animDataPtrs`. The final animation lookup already checks its
+   index; the promising remaining areas are blend-pointer arithmetic, cursor
+   reseeding, stream sentinels and speed-dependent frame advancement. Synthetic
+   animation tables can exercise these without original assets.
+3. **Item/effect rendering and state ranges.** `itemEffectId`, `itemEffectState`,
+   `itemHeightMod` and `effectYMod` reach `render_character_d3d.c` and
+   `RenderItemSprite()` / `RenderPlayerItemEffect()` in `render_char_sprites.c`.
+   Check UV-table indices, projection arithmetic and legal state combinations
+   using synthetic lookup tables and captured draw arguments. Rendering remains
+   reachable for remote players despite the physics skip.
+4. **Race progress and finish bookkeeping.** Review decoded `lapsCompleted`
+   and `racePosition` with position-derived progress in `race.c` and finish
+   transitions in `net/network.c`. Establish behavior for discontinuities,
+   repeated finish transitions and extreme values without changing valid race
+   ordering. Physics-only consumers of other state fields should first be
+   checked against `net_should_run_physics()` before being treated as reachable.
