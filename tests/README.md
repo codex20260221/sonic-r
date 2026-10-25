@@ -176,9 +176,45 @@ history and finish bookkeeping unchanged.
 `--source` and `--delta-source` select exported production sources. The cases
 `snapshot`, `snapshot-late`, `input` and `decoder` isolate the original defects.
 `--sanitize` enables GCC/Clang ASan/UBSan where supported; UCRT64 here lacks
-`libasan`, so packet sanitizer coverage is not claimed. MSVC ASan covers the
-codec separately. These tests do not test real transport or concurrency.
+`libasan`. Native MSVC ASan coverage of the receiver and transport is supplied
+by the authority harness below. These 615 tests use no sockets or concurrency.
 See [network receive verification](../docs/network-receive-2026-10-24.md).
+
+## Network sender and slot authority
+
+Run from the repository root in UCRT64:
+
+```sh
+python tests/run_net_authority.py --cc gcc
+CFLAGS=-fanalyzer python tests/run_net_authority.py --cc gcc
+```
+
+For native Windows AddressSanitizer, use an x64 MSVC developer environment.
+Set `MSYS2_UCRT64` to the existing UCRT64 prefix containing winpthreads:
+
+```powershell
+python tests/run_net_authority.py --cc cl --sanitize --ucrt64-dir "$env:MSYS2_UCRT64"
+```
+
+The prefix option can be omitted when UCRT64 `gcc` is on `PATH`. The runner
+uses the installed pthread headers/import library/runtime, with temporary
+MSVC compatibility headers; it installs nothing and changes no production
+declarations. Build outputs live in a temporary directory.
+
+The 626 cases include unauthorized player-slot updates, non-host snapshots
+and controls, malformed control lengths and metadata, stale queued endpoint
+identities, discovery/JOIN admission, duplicate START, valid legacy control
+forms, clean leaves and disconnect watchdogs. They include the complete
+production `network.c`, `net_transport.c` and interpolation implementation,
+and link the production codec and game globals. Deterministic state checks
+are supplemented by UDP host/client lifecycles, including an actual receive
+thread. Every socket bind and datagram in this harness is restricted to
+loopback, using OS-assigned ports. No assets or external services are used.
+
+`--case` selects a focused group; `--source` and `--transport-source` select
+exported production baselines. A 20-second child-process timeout detects
+stalled controls. See the [authority audit](../docs/network-authority-2026-10-25.md)
+for baseline failures, compatibility details and unverified risks.
 
 ## Loss, duplication and reordering
 

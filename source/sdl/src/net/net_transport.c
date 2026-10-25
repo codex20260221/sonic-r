@@ -8,6 +8,7 @@
 
 #include "net_transport.h"
 #include "endian_util.h"
+#include "matchmaker.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -29,6 +30,7 @@ typedef SOCKET net_socket_t;
 #define NET_WOULD_BLOCK(e) ((e) == WSAEWOULDBLOCK)
 #elif defined(SONICR_DC)
 #include <kos/fs.h>
+#include <kos/mutex.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -48,6 +50,7 @@ typedef int net_socket_t;
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <pthread.h>
 
 typedef int net_socket_t;
 #define NET_INVALID_SOCKET (-1)
@@ -66,8 +69,30 @@ static int s_isHost = 0;                               /* 1 if we are the host *
 
 /* Per-player address table (host uses this to know where to send) */
 static struct sockaddr_in s_playerAddr[NET_MAX_PLAYERS];
-static int                s_playerValid[NET_MAX_PLAYERS]; /* 1 if slot has an address */
+static int                s_playerValid[NET_MAX_PLAYERS]; /* pending/established below */
 static int                s_playerCount = 0;
+/* 0 = free, 1 = pending JOIN, 2 = established endpoint. */
+#define NET_PEER_PENDING 1
+#define NET_PEER_ESTABLISHED 2
+static uint64_t s_playerGeneration[NET_MAX_PLAYERS];
+static uint64_t s_generationCounter, s_transportGeneration;
+static int s_joinable;
+
+/* The receive thread reserves endpoints; the main thread commits/frees them
+ * and sends packets. Keep address, admission and generation changes together. */
+#ifdef _WIN32
+static SRWLOCK s_peerMutex = SRWLOCK_INIT;
+#define PEER_LOCK() AcquireSRWLockExclusive(&s_peerMutex)
+#define PEER_UNLOCK() ReleaseSRWLockExclusive(&s_peerMutex)
+#elif defined(SONICR_DC)
+static mutex_t s_peerMutex = MUTEX_INITIALIZER;
+#define PEER_LOCK() mutex_lock(&s_peerMutex)
+#define PEER_UNLOCK() mutex_unlock(&s_peerMutex)
+#else
+static pthread_mutex_t s_peerMutex = PTHREAD_MUTEX_INITIALIZER;
+#define PEER_LOCK() pthread_mutex_lock(&s_peerMutex)
+#define PEER_UNLOCK() pthread_mutex_unlock(&s_peerMutex)
+#endif
 
 /* Host address (client stores this) */
 static struct sockaddr_in s_hostAddr;
@@ -129,38 +154,51 @@ static int find_slot(const struct sockaddr_in *addr)
     return -1;
 }
 
+static uint64_t next_generation(void)
+{
+    if (++s_generationCounter == 0) ++s_generationCounter;
+    return s_generationCounter;
+}
+
+static void net_close_locked(void)
+{
+    socket_close_if_valid(&s_socket);
+    socket_close_if_valid(&s_discoverSocket);
+    memset(s_playerValid, 0, sizeof(s_playerValid));
+    memset(s_playerGeneration, 0, sizeof(s_playerGeneration));
+    s_transportGeneration = next_generation();
+    s_playerCount = s_active = s_isHost = s_localSlot = s_joinable = 0;
+}
+
 /* =====================================================================
  * Public API
  * ===================================================================== */
 
 int net_transport_init(void)
 {
+    PEER_LOCK();
 #ifdef _WIN32
     if (!s_winsockInitialized) {
         WSADATA wsa;
         if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
             fprintf(stderr, "net: WSAStartup failed\n");
+            PEER_UNLOCK();
             return -1;
         }
         s_winsockInitialized = 1;
     }
 #endif
 
+    net_close_locked();
     memset(s_playerAddr, 0, sizeof(s_playerAddr));
-    memset(s_playerValid, 0, sizeof(s_playerValid));
-    s_playerCount = 0;
-    s_active = 0;
-    s_isHost = 0;
-    s_socket = NET_INVALID_SOCKET;
-    s_discoverSocket = NET_INVALID_SOCKET;
-    s_localSlot = 0;
+    PEER_UNLOCK();
     return 0;
 }
 
-int net_host_start(int port)
+static int net_host_start_locked(int port)
 {
     if (s_active && s_isHost) return 0;
-    if (s_active) net_close();
+    if (s_active) net_close_locked();
 
     s_socket = socket(AF_INET, SOCK_DGRAM, 0);
     if (!socket_is_valid(s_socket)) {
@@ -196,16 +234,26 @@ int net_host_start(int port)
 
     /* Register self in player table */
     memset(&s_playerAddr[0], 0, sizeof(s_playerAddr[0]));
-    s_playerValid[0] = 1;  /* host is "connected" to itself */
+    s_playerValid[0] = NET_PEER_ESTABLISHED;
+    s_playerGeneration[0] = s_transportGeneration = next_generation();
+    s_joinable = 1;
     s_playerCount = 1;
 
     fprintf(stderr, "net: hosting on port %d\n", port);
     return 0;
 }
 
-int net_client_connect(const char *host_ip, int port)
+int net_host_start(int port)
 {
-    if (s_active) net_close();
+    PEER_LOCK();
+    int result = net_host_start_locked(port);
+    PEER_UNLOCK();
+    return result;
+}
+
+static int net_client_connect_locked(const char *host_ip, int port)
+{
+    if (s_active) net_close_locked();
 
     s_socket = socket(AF_INET, SOCK_DGRAM, 0);
     if (!socket_is_valid(s_socket)) {
@@ -240,17 +288,27 @@ int net_client_connect(const char *host_ip, int port)
     s_isHost = 0;
     s_active = 1;
     s_localSlot = -1;  /* assigned by host later */
+    s_playerAddr[0] = s_hostAddr;
+    s_playerValid[0] = NET_PEER_ESTABLISHED;
+    s_playerGeneration[0] = s_transportGeneration = next_generation();
 
     fprintf(stderr, "net: connecting to %s:%d\n", host_ip, port);
     return 0;
 }
 
+int net_client_connect(const char *host_ip, int port)
+{
+    PEER_LOCK();
+    int result = net_client_connect_locked(host_ip, port);
+    PEER_UNLOCK();
+    return result;
+}
+
 /* A client has no business putting anything on the wire before the host has
  * assigned it a slot; JOIN_REQ is the one legitimate exception, since it is
- * what asks for the slot. This mirrors the unregistered-slot check in
- * ProcessNetworkMessages (network.c) but fires at the SENDER, so the stack
- * trace names the code that sent too early rather than the host that received
- * it. net_broadcast delegates here for clients, so this covers both paths. */
+ * what asks for the slot. Keep this local programming invariant in addition
+ * to the host's defensive receive checks. net_broadcast delegates here for
+ * clients, so this covers both send paths. */
 static void assert_may_send(const void *data, int len)
 {
     if (s_localSlot >= 0) return;
@@ -266,7 +324,7 @@ static void assert_may_send(const void *data, int len)
     abort();
 }
 
-int net_send_to_host(const void *data, int len)
+static int net_send_to_host_locked(const void *data, int len)
 {
     if (!s_active || !socket_is_valid(s_socket)) return -1;
 
@@ -282,14 +340,22 @@ int net_send_to_host(const void *data, int len)
     return (int)n;
 }
 
-int net_broadcast(const void *data, int len)
+int net_send_to_host(const void *data, int len)
+{
+    PEER_LOCK();
+    int result = net_send_to_host_locked(data, len);
+    PEER_UNLOCK();
+    return result;
+}
+
+static int net_broadcast_locked(const void *data, int len)
 {
     if (!s_active || !socket_is_valid(s_socket)) return -1;
 
     if (s_isHost) {
         /* Host: send to each connected client (skip slot 0 = self) */
         for (int i = 1; i < NET_MAX_PLAYERS; i++) {
-            if (!s_playerValid[i]) continue;
+            if (s_playerValid[i] != NET_PEER_ESTABLISHED) continue;
             sendto(s_socket, data, (size_t)len, 0,
                    (struct sockaddr *)&s_playerAddr[i],
                    sizeof(s_playerAddr[i]));
@@ -297,15 +363,23 @@ int net_broadcast(const void *data, int len)
         return 0;
     } else {
         /* Client: send to host (host relays) */
-        return net_send_to_host(data, len);
+        return net_send_to_host_locked(data, len);
     }
 }
 
-int net_send_to(int player_slot, const void *data, int len)
+int net_broadcast(const void *data, int len)
+{
+    PEER_LOCK();
+    int result = net_broadcast_locked(data, len);
+    PEER_UNLOCK();
+    return result;
+}
+
+static int net_send_to_locked(int player_slot, const void *data, int len)
 {
     if (!s_active || !socket_is_valid(s_socket)) return -1;
     if (player_slot < 0 || player_slot >= NET_MAX_PLAYERS) return -1;
-    if (!s_playerValid[player_slot]) return -1;
+    if (s_playerValid[player_slot] != NET_PEER_ESTABLISHED) return -1;
 
     if (player_slot == s_localSlot) return len; /* sending to self */
 
@@ -315,61 +389,125 @@ int net_send_to(int player_slot, const void *data, int len)
     return (int)n;
 }
 
-int net_recv(void *buf, int maxlen, int *from_slot)
+int net_send_to(int player_slot, const void *data, int len)
 {
-    if (!s_active || !socket_is_valid(s_socket)) return 0;
+    PEER_LOCK();
+    int result = net_send_to_locked(player_slot, data, len);
+    PEER_UNLOCK();
+    return result;
+}
 
+int net_join_request_valid_length(int len)
+{
+    enum { LEGACY = 4 + MM_MAX_USERNAME, EXTENDED = LEGACY + 16 + 1 };
+    return len == LEGACY || len == EXTENDED || len == ((EXTENDED + 3) & ~3);
+}
+
+int net_recv_packet(void *buf, int maxlen, int *from_slot, uint64_t *generation)
+{
+    if (from_slot) *from_slot = -1;
+    if (generation) *generation = 0;
+    if (maxlen < 4) return 0;
+    PEER_LOCK();
+    net_socket_t socket = s_socket;
+    uint64_t session = s_transportGeneration;
+    int active = s_active;
+    PEER_UNLOCK();
+    if (!active || !socket_is_valid(socket)) return 0;
+
+    /* One spare byte detects truncation portably, without publishing a
+     * partially received datagram as a valid small control packet. */
+    char packet[NET_MAX_PACKET + 1];
     struct sockaddr_in sender;
     socklen_t sender_len = sizeof(sender);
-
-    ssize_t n = recvfrom(s_socket, buf, (size_t)maxlen, 0,
+    ssize_t n = recvfrom(socket, packet, sizeof(packet), 0,
                           (struct sockaddr *)&sender, &sender_len);
-
-
-    if (n <= 0) {
-        if (NET_WOULD_BLOCK(NET_LAST_ERROR()))
-            return 0;  /* no data available */
-        return -1;      /* real error */
+    if (n < 0) {
+        int error = NET_LAST_ERROR();
+#ifdef _WIN32
+        if (error == WSAEMSGSIZE) return 0;
+#else
+        if (error == EMSGSIZE) return 0;
+#endif
+        return NET_WOULD_BLOCK(error) ? 0 : -1;
     }
-    /* Check for discovery packet — host responds automatically */
-    if (s_isHost && n >= 4) {
-        uint32_t magic = rl32u(buf);
-        if (magic == NET_DISCOVER_MAGIC) {
+    if (n < 4 || n > NET_MAX_PACKET || n > maxlen) return 0;
+    uint32_t header = rl32u(packet);
+    PEER_LOCK();
+    if (!s_active || s_socket != socket || s_transportGeneration != session) {
+        PEER_UNLOCK();
+        return 0;
+    }
+    if (s_isHost && header == NET_DISCOVER_MAGIC) {
+        if (n == 4) {
             char _rbuf[4];
             wl32(_rbuf, NET_DISCOVER_REPLY);
-            sendto(s_socket, _rbuf, 4, 0,
+            sendto(socket, _rbuf, 4, 0,
                    (struct sockaddr *)&sender, sender_len);
-            return 0;  /* consumed internally, don't pass to game */
         }
+        PEER_UNLOCK();
+        return 0;
     }
-
-    /* Identify sender */
     int slot = find_slot(&sender);
-
-    /* Host: auto-register unknown senders as new clients */
     if (s_isHost && slot < 0) {
+        if (!s_joinable || header != NET_MSG_JOIN_REQ || !net_join_request_valid_length((int)n)) {
+            PEER_UNLOCK();
+            return 0;
+        }
         for (int i = 1; i < NET_MAX_PLAYERS; i++) {
             if (!s_playerValid[i]) {
                 s_playerAddr[i] = sender;
-                s_playerValid[i] = 1;
+                s_playerGeneration[i] = next_generation();
+                s_playerValid[i] = NET_PEER_PENDING;
                 s_playerCount++;
                 slot = i;
-                fprintf(stderr, "net: player %d joined from %s:%d\n",
-                        i, inet_ntoa(sender.sin_addr), ntohs(sender.sin_port));
                 break;
             }
         }
     }
-
+    if (slot < 0 || (s_isHost && s_playerValid[slot] != NET_PEER_ESTABLISHED &&
+                    (header != NET_MSG_JOIN_REQ || !net_join_request_valid_length((int)n)))) {
+        PEER_UNLOCK();
+        return 0;
+    }
     if (from_slot) *from_slot = slot;
+    if (generation) *generation = s_playerGeneration[slot];
+    PEER_UNLOCK();
+    memcpy(buf, packet, (size_t)n);
     return (int)n;
+}
+
+int net_recv(void *buf, int maxlen, int *from_slot)
+{
+    return net_recv_packet(buf, maxlen, from_slot, NULL);
+}
+
+int net_peer_is_current(int slot, uint64_t generation)
+{
+    PEER_LOCK();
+    int valid = s_active && slot >= 0 && slot < NET_MAX_PLAYERS &&
+                s_playerValid[slot] && generation != 0 && s_playerGeneration[slot] == generation;
+    PEER_UNLOCK();
+    return valid;
+}
+
+void net_set_joinable(int joinable)
+{
+    PEER_LOCK();
+    s_joinable = !!joinable;
+    PEER_UNLOCK();
 }
 
 int net_register_client(int slot)
 {
-    if (slot < 0 || slot >= NET_MAX_PLAYERS) return -1;
-    /* Slot registration is handled automatically in net_recv for now */
-    return slot;
+    PEER_LOCK();
+    int result = -1;
+    if (s_isHost && slot >= 0 && slot < NET_MAX_PLAYERS && s_playerValid[slot]) {
+        s_playerValid[slot] = NET_PEER_ESTABLISHED;
+        result = slot;
+    }
+    PEER_UNLOCK();
+    return result;
 }
 
 int net_discover_send(int port)
@@ -431,52 +569,65 @@ int net_discover_check(char *host_ip, int host_ip_len)
 
 int net_is_active(void)
 {
-    return s_active;
+    PEER_LOCK();
+    int result = s_active;
+    PEER_UNLOCK();
+    return result;
 }
 
 int net_is_host(void)
 {
-    return s_isHost;
+    PEER_LOCK();
+    int result = s_isHost;
+    PEER_UNLOCK();
+    return result;
 }
 
 int net_local_slot(void)
 {
-    return s_localSlot;
+    PEER_LOCK();
+    int result = s_localSlot;
+    PEER_UNLOCK();
+    return result;
 }
 
 void net_set_local_slot(int slot)
 {
+    PEER_LOCK();
     s_localSlot = slot;
+    PEER_UNLOCK();
 }
 
 void net_close(void)
 {
-    socket_close_if_valid(&s_socket);
-    socket_close_if_valid(&s_discoverSocket);
-    memset(s_playerValid, 0, sizeof(s_playerValid));
-    s_playerCount = 0;
-    s_active = 0;
-    s_isHost = 0;
-    s_localSlot = 0;
+    PEER_LOCK();
+    net_close_locked();
+    PEER_UNLOCK();
     fprintf(stderr, "net: closed\n");
 }
 
 void net_unregister_slot(int slot)
 {
     if (slot <= 0 || slot >= NET_MAX_PLAYERS) return;
-    if (!s_playerValid[slot]) return;
+    PEER_LOCK();
+    if (!s_playerValid[slot]) { PEER_UNLOCK(); return; }
     fprintf(stderr, "net: freed slot %d (%s:%d)\n",
             slot, inet_ntoa(s_playerAddr[slot].sin_addr),
             ntohs(s_playerAddr[slot].sin_port));
     memset(&s_playerAddr[slot], 0, sizeof(s_playerAddr[slot]));
     s_playerValid[slot] = 0;
+    s_playerGeneration[slot] = 0;
     if (s_playerCount > 0) s_playerCount--;
+    PEER_UNLOCK();
 }
 
 int net_slot_is_connected(int slot)
 {
     if (slot < 0 || slot >= NET_MAX_PLAYERS) return 0;
-    return s_playerValid[slot] ? 1 : 0;
+    PEER_LOCK();
+    int result = s_playerValid[slot] == NET_PEER_ESTABLISHED;
+    PEER_UNLOCK();
+    return result;
 }
 
 #ifdef SONICR_DC

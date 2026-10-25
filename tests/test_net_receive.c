@@ -20,6 +20,7 @@ static NetDeltaSendState send_states[NET_MAX_PLAYERS];
 
 /* All transport operations are deterministic stubs. Unexpected sends fail the
  * test, and no real transport or matchmaker object is linked. */
+#ifndef SONICR_TEST_REAL_TRANSPORT
 int net_is_host(void) { return host; }
 int net_is_active(void) { return 1; }
 int net_recv(void *buf, int maxlen, int *from_slot)
@@ -31,17 +32,31 @@ int net_recv(void *buf, int maxlen, int *from_slot)
     packet_ready = 0;
     return incoming_len;
 }
+int net_recv_packet(void *buf, int maxlen, int *from_slot, uint64_t *generation)
+{
+    int len = net_recv(buf, maxlen, from_slot);
+    *generation = 1;
+    return len;
+}
+int net_peer_is_current(int slot, uint64_t generation)
+{ return slot >= 0 && slot < NET_MAX_PLAYERS && generation == 1; }
+int net_join_request_valid_length(int len)
+{ return len == 4 + MM_MAX_USERNAME || len == 4 + MM_MAX_USERNAME + 17 || len == 56; }
+void net_set_joinable(int joinable) { (void)joinable; }
 int net_broadcast(const void *p, int n) { (void)p; (void)n; CHECK(0); return -1; }
 int net_send_to(int s, const void *p, int n) { (void)s; (void)p; (void)n; CHECK(0); return -1; }
 int net_send_to_host(const void *p, int n) { (void)p; (void)n; CHECK(0); return -1; }
-int net_slot_is_connected(int slot) { (void)slot; return 0; }
+int net_slot_is_connected(int slot) { return slot >= 0 && slot < g_netPlayerCount; }
 int net_register_client(int slot) { (void)slot; CHECK(0); return -1; }
 void net_unregister_slot(int slot) { (void)slot; CHECK(0); }
 void net_set_local_slot(int slot) { (void)slot; CHECK(0); }
-int net_local_slot(void) { CHECK(0); return -1; }
+int net_local_slot(void) { return g_localPlayerIndex; }
 void net_close(void) { CHECK(0); }
+#endif
 int ReadLocalInput(void) { CHECK(0); return 0; }
+#ifndef SONICR_TEST_REAL_TRANSPORT
 void platform_pump_events(void) { CHECK(0); }
+#endif
 const char *MatchmakerGetUsername(void) { CHECK(0); return ""; }
 void DebugLog(char *fmt, ...) { (void)fmt; }
 uint32_t platform_get_time_ms(void) { return (uint32_t)now_ms; }
@@ -119,6 +134,7 @@ static void reset_fixture(int is_host)
     s_threadRunning = 0;
     g_netPlayerCount = NET_MAX_PLAYERS;
     g_localPlayerIndex = is_host ? 0 : 3;
+    s_haveSlotAssign = !is_host;
     g_netSessionActive = 1;
     g_netGameStarted = 0;
     g_introCountdown = 10;
@@ -138,6 +154,9 @@ static void reset_fixture(int is_host)
         source_players[i].posY = 2000 + i * 100;
         source_players[i].lapsCompleted = 2;
     }
+#ifdef SONICR_TEST_REAL_TRANSPORT
+    fixture_transport_reset(is_host);
+#endif
 }
 
 static int snapshot(char *packet, int keyframe, uint16_t seq)

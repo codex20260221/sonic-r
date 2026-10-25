@@ -188,16 +188,27 @@ int net_broadcast(const void *data, int len);
 int net_send_to(int player_slot, const void *data, int len);
 
 /**
- * Non-blocking receive. Returns bytes received and fills
- * *from_slot with the sender's player slot (-1 if unknown).
- * Returns 0 if no data available, -1 on error.
+ * Non-blocking receive. Returns bytes received and fills *from_slot with
+ * an established sender's slot (or a pending valid JOIN reservation).
+ * Unknown senders and invalid datagrams are dropped. Returns 0 when no
+ * packet is delivered, -1 on a socket error.
  */
 int net_recv(void *buf, int maxlen, int *from_slot);
 
+/* Receive-thread identity stamp. This is local metadata, never wire data.
+ * A queued packet must still belong to the same endpoint/session at dispatch. */
+int net_recv_packet(void *buf, int maxlen, int *from_slot, uint64_t *generation);
+int net_peer_is_current(int slot, uint64_t generation);
+
+/* Recognized legacy, extended and native-structure-padded JOIN requests. */
+int net_join_request_valid_length(int len);
+
+/* Host admission closes when starting a race; established peers remain valid. */
+void net_set_joinable(int joinable);
+
 /**
- * Register a new client address (host-side, called when a new
- * player's first packet arrives). Returns assigned slot index,
- * or -1 if full.
+ * Commit a pending JOIN reservation after application validation.
+ * Returns the slot, or -1 if no such reservation exists.
  */
 int net_register_client(int slot);
 

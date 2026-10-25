@@ -30,7 +30,7 @@ extern void platform_pump_events(void);
  * Receive thread — packet ring buffer
  *
  * Binary: background thread at 0x4D8D10 calls IDirectPlay4::Receive
- * in a loop and signals Windows events. SDL: pthread reads net_recv()
+ * in a loop and signals Windows events. SDL: pthread reads net_recv_packet()
  * and enqueues packets; main thread dequeues in ApplyNetworkPlayerState.
  * ===================================================================== */
 
@@ -40,6 +40,7 @@ typedef struct {
     char data[NET_MAX_PACKET];
     int  len;
     int  from_slot;
+    uint64_t generation;
 } NetPacket;
 
 static NetPacket        s_packetQueue[NET_QUEUE_SIZE];
@@ -63,7 +64,7 @@ static volatile int     s_threadRunning;
 #endif
 
 /* Enqueue a received packet (called from recv thread only) */
-static void net_enqueue(const char *data, int len, int from_slot)
+static void net_enqueue(const char *data, int len, int from_slot, uint64_t generation)
 {
     QUEUE_LOCK();
     int next = (s_queueHead + 1) % NET_QUEUE_SIZE;
@@ -73,6 +74,7 @@ static void net_enqueue(const char *data, int len, int from_slot)
         memcpy(pkt->data, data, (size_t)len);
         pkt->len = len;
         pkt->from_slot = from_slot;
+        pkt->generation = generation;
         s_queueHead = next;
     }
     QUEUE_UNLOCK();
@@ -80,7 +82,7 @@ static void net_enqueue(const char *data, int len, int from_slot)
 
 /* Dequeue one packet (called from main thread only).
  * Returns bytes copied, 0 if empty. */
-static int net_dequeue(char *buf, int maxlen, int *from_slot)
+static int net_dequeue(char *buf, int maxlen, int *from_slot, uint64_t *generation)
 {
     QUEUE_LOCK();
     if (s_queueTail == s_queueHead) {
@@ -92,6 +94,7 @@ static int net_dequeue(char *buf, int maxlen, int *from_slot)
     if (len > maxlen) len = maxlen;
     memcpy(buf, pkt->data, (size_t)len);
     if (from_slot) *from_slot = pkt->from_slot;
+    if (generation) *generation = pkt->generation;
     s_queueTail = (s_queueTail + 1) % NET_QUEUE_SIZE;
     QUEUE_UNLOCK();
     return len;
@@ -105,9 +108,10 @@ static void *net_recv_thread_func(void *arg)
     int from_slot;
 
     while (s_threadRunning) {
-        int len = net_recv(buf, sizeof(buf), &from_slot);
+        uint64_t generation;
+        int len = net_recv_packet(buf, sizeof(buf), &from_slot, &generation);
         if (len > 0) {
-            net_enqueue(buf, len, from_slot);
+            net_enqueue(buf, len, from_slot, generation);
 #ifdef SONICR_DC
         } else {
             thd_sleep(1);
@@ -174,13 +178,18 @@ void NetLevelSyncBarrier(void)
         /* Build expected mask: bits for all connected players */
         int expectedMask = 0;
         for (int i = 0; i < g_netPlayerCount && i < NET_MAX_PLAYERS; i++)
-            expectedMask |= (1 << i);
+            if (net_slot_is_connected(i)) expectedMask |= (1 << i);
 
         DebugLog("Host: waiting for all peers (expected mask=0x%x)\n", expectedMask);
 
         /* Pump until everyone reports in */
-        while (s_levelReadyMask != expectedMask) {
+        while ((s_levelReadyMask & expectedMask) != expectedMask) {
             ApplyNetworkPlayerState();
+            /* A legitimate LEAVE during loading must not strand the host
+             * waiting for a slot that no longer participates. */
+            expectedMask = 1;
+            for (int i = 1; i < NET_MAX_PLAYERS; ++i)
+                if (net_slot_is_connected(i)) expectedMask |= (1 << i);
             platform_pump_events();
 #ifdef SONICR_DC
             thd_sleep(1);
@@ -758,6 +767,12 @@ static void host_release_slot_identity(int slot)
 
     net_set_slot_name(slot, "");
     net_set_slot_platform(slot, "", 0);
+    g_playerBase[slot].netActive = 0;
+    g_playerBase[slot].netConnected = 0;
+    g_netPlayerRecvd[slot] = g_netPlayerAlive[slot] = 0;
+    s_netInputBuffer[slot] = 0;
+    s_lastRecvInputSeq[slot] = 0;
+    net_delta_reset_recv(&s_deltaRecv[slot]);
 
     char *entry = g_netPlayerDecorations + slot * NET_DECO_STRIDE;
     memset(entry, 0, NET_DECO_STRIDE);
@@ -850,13 +865,18 @@ int net_should_run_physics(int playerIdx)
  */
 /**
  * net_poll_one — dequeue one packet from the recv thread queue
- * (or net_recv directly if no thread). Returns bytes, 0 if empty.
+ * (or net_recv_packet directly if no thread). Returns bytes, 0 if empty.
  */
 static int net_poll_one(char *buf, int maxlen, int *from_slot)
 {
-    return s_threadRunning
-        ? net_dequeue(buf, maxlen, from_slot)
-        : net_recv(buf, maxlen, from_slot);
+    for (;;) {
+        uint64_t generation = 0;
+        int len = s_threadRunning
+            ? net_dequeue(buf, maxlen, from_slot, &generation)
+            : net_recv_packet(buf, maxlen, from_slot, &generation);
+        if (len <= 0 || net_peer_is_current(*from_slot, generation)) return len;
+        /* Discard queued packets belonging to an earlier endpoint/session. */
+    }
 }
 
 void SendNetworkHostData(void)
@@ -1086,9 +1106,9 @@ void WaitForNetworkData(void)
     /* Poll for game data broadcast (0xFF0000F0, 16 bytes) from host */
     while (timeGetTime() < deadline) {
         int len = net_poll_one(buf, sizeof(buf), &from_slot);
-        if (len >= 16) {
+        if (len == 16) {
             unsigned int hdr = rl32u(buf);
-            if (hdr == 0xFF0000F0u) {
+            if (hdr == 0xFF0000F0u && !net_is_host() && from_slot == 0 && s_haveSlotAssign) {
                 /* Game data broadcast from host — extract frame + input */
                 g_gameDataPacketFrame = rl16u(buf + 4);
                 g_netSessionFrame = (int)g_gameDataPacketFrame;
@@ -1317,6 +1337,7 @@ void SendNetworkClientData(void)
 void InitNetworkGame(void)
 {
     int i;
+    if (net_is_host()) net_set_joinable(0);
 
     /* Copy 48 bytes of lobby config: g_netGameInfoDest → g_netLobbyDataCopy */
     {                                                       /* memcpy(0x68AE88, 0x68A89C, 0x30) */
@@ -1456,6 +1477,15 @@ void InitNetworkGame(void)
  *     NET_MSG_SNAPSHOT — world snapshot from host
  *     0xFFF0003F — camera sync
  */
+static int net_valid_config(const char *fields)
+{
+    int track = rl16s(fields), mode = rl16s(fields + 2);
+    int weather = rl16s(fields + 4), time = rl16s(fields + 6);
+    return track >= 0 && track < TRACK_RADIANT_EMERALD && mode >= 0 && mode <= 1 &&
+           weather >= WEATHER_CLEAR && weather <= WEATHER_SNOW &&
+           time >= TOD_SUNRISE && time <= TOD_NIGHT;
+}
+
 void ApplyNetworkPlayerState(void)
 {
     char buf[NET_MAX_PACKET];
@@ -1473,10 +1503,23 @@ void ApplyNetworkPlayerState(void)
 
         unsigned int header = rl32u(buf);
 
-        /* Polite client goodbye — free the slot immediately rather than
-         * waiting for the stale-slot watchdog. Handled before the unregistered
-         * -slot fatal check so a stray LEAVE doesn't trip it. */
-        if (net_is_host() && header == NET_MSG_LEAVE) {
+        /* Transport association is necessary but not sufficient: a pending
+         * JOIN cannot speak for an established player, and a client accepts
+         * server messages only from its configured host (slot 0). */
+        if (!net_is_active()) continue;
+        if (net_is_host()) {
+            if (header != NET_MSG_JOIN_REQ &&
+                (from_slot <= 0 || from_slot >= g_netPlayerCount ||
+                 !net_slot_is_connected(from_slot))) continue;
+        } else {
+            if (from_slot != 0) continue;
+            if (header != NET_MSG_SLOT_ASSIGN &&
+                (!s_haveSlotAssign || net_local_slot() < 1)) continue;
+        }
+
+        /* Polite client goodbye: only an established sender can free its
+         * own slot, without waiting for the stale-slot watchdog. */
+        if (net_is_host() && header == NET_MSG_LEAVE && len == 4) {
             if (from_slot >= 1 && from_slot < NET_MAX_PLAYERS) {
                 DebugLog("Host: slot %d sent LEAVE\n", from_slot);
                 net_unregister_slot(from_slot);
@@ -1487,7 +1530,7 @@ void ApplyNetworkPlayerState(void)
         }
 
         /* ---- Start-game ack from client ---- */
-        if (net_is_host() && header == NET_MSG_START_ACK) {
+        if (net_is_host() && header == NET_MSG_START_ACK && len == 4) {
             if (from_slot >= 0 && from_slot < NET_MAX_PLAYERS) {
                 s_startAckMask |= (1 << from_slot);
                 DebugLog("Host: slot %d acked START_GAME (mask=0x%x)\n",
@@ -1497,7 +1540,7 @@ void ApplyNetworkPlayerState(void)
         }
 
         /* ---- Level-load sync: client reports ready ---- */
-        if (net_is_host() && header == NET_MSG_LEVEL_READY) {
+        if (net_is_host() && header == NET_MSG_LEVEL_READY && len == 4) {
             if (from_slot >= 0 && from_slot < NET_MAX_PLAYERS) {
                 s_levelReadyMask |= (1 << from_slot);
                 DebugLog("Host: slot %d level ready (mask=0x%x)\n",
@@ -1507,46 +1550,27 @@ void ApplyNetworkPlayerState(void)
         }
 
         /* ---- Level-load sync: host says GO ---- */
-        if (!net_is_host() && header == NET_MSG_LEVEL_GO) {
+        if (!net_is_host() && header == NET_MSG_LEVEL_GO && len == 4) {
             s_levelGoReceived = 1;
             DebugLog("Client: received LEVEL_GO\n");
             continue;
         }
 
-        /* Implicit-join used to be a fallback for clients that never sent
-         * NET_MSG_JOIN_REQ.  Now that JOIN_REQ is the only supported entry
-         * point and carries the joiner's username, ANY non-JOIN_REQ packet
-         * from a not-yet-registered slot is a bug — hard-fail so we notice.
-         * (JOIN_REQ itself is the legitimate first packet from a new slot,
-         * so it must not trip this check.) */
-        if (net_is_host() && from_slot >= 1 && from_slot < NET_MAX_PLAYERS
-            && from_slot >= g_netPlayerCount
-            && header != NET_MSG_JOIN_REQ) {
-            /* struct { int hdr; int slot; } reply;
-             * reply.hdr  = NET_MSG_SLOT_ASSIGN;
-             * reply.slot = from_slot;
-             * net_send_to(from_slot, &reply, sizeof(reply));
-             * g_netPlayerCount = from_slot + 1;
-             * DebugLog("Host: implicit join for slot %d, playerCount=%d\n",
-             *          from_slot, g_netPlayerCount);
-             * { extern int g_netLobbyPlayerSlot;
-             *   g_netLobbyPlayerSlot = from_slot; } */
-            fprintf(stderr,
-                    "FATAL: packet header 0x%08x from unregistered slot %d before NET_MSG_JOIN_REQ. "
-                    "Client must send JOIN_REQ first.\n",
-                    header, from_slot);
-            abort();
-        }
-
         /* ---- SDL session protocol: join request / slot assignment ---- */
         if (header == NET_MSG_JOIN_REQ && net_is_host()) {
-            /* Host: client requested a slot. from_slot was auto-assigned
-             * by net_recv(). Payload carries the client's matchmaker
+            /* Host: client requested a slot. from_slot was reserved
+             * by net_recv_packet(). Payload carries the client's matchmaker
              * username; we use it to populate the decoration table.
              * Reply with the full name table so the new client knows
              * everyone, then broadcast PEER_NAME so existing clients
              * learn the new joiner's name. */
-            if (from_slot >= 1 && from_slot < NET_MAX_PLAYERS && len >= 4 + MM_MAX_USERNAME) {
+            if (from_slot >= 1 && from_slot < NET_MAX_PLAYERS && net_join_request_valid_length(len)) {
+                int joining = !net_slot_is_connected(from_slot);
+                if (joining && g_netSessionActive) {
+                    net_unregister_slot(from_slot);
+                    continue;
+                }
+                if (net_register_client(from_slot) < 0) continue;
                 /* Pull the client's username out of the request payload. */
                 char joinerName[MM_MAX_USERNAME];
                 memcpy(joinerName, buf + 4, MM_MAX_USERNAME);
@@ -1561,7 +1585,7 @@ void ApplyNetworkPlayerState(void)
                     joinerRegion = (uint8_t)buf[4 + MM_MAX_USERNAME + NET_PLATFORM_LEN];
                 }
 
-                g_netPlayerCount = from_slot + 1;  /* grow as players join */
+                if (g_netPlayerCount <= from_slot) g_netPlayerCount = from_slot + 1;
                 DebugLog("Host: client joined as slot %d ('%s' %s r%d), playerCount=%d\n",
                          from_slot, joinerName, joinerPlatform, joinerRegion, g_netPlayerCount);
 
@@ -1643,18 +1667,20 @@ void ApplyNetworkPlayerState(void)
                 }
 
                 /* Signal lobby state machine — screen_misc.c checks this */
-                g_netLobbyPlayerSlot = from_slot;
+                if (joining) g_netLobbyPlayerSlot = from_slot;
 
             }
             continue;
         }
 
         if (header == NET_MSG_SLOT_ASSIGN && !net_is_host()
-            && len >= 8 + NET_MAX_PLAYERS * MM_MAX_USERNAME) {
+            && (len == 8 + NET_MAX_PLAYERS * MM_MAX_USERNAME ||
+                len == 8 + NET_MAX_PLAYERS * (MM_MAX_USERNAME + NET_PLATFORM_LEN + 1))) {
             /* Client: host told us our slot, plus the full name/platform table
              * for everyone currently in the session. */
             int slot = rl32s(buf + 4);
-            if (slot >= 0 && slot < NET_MAX_PLAYERS) {
+            if (slot >= 1 && slot < NET_MAX_PLAYERS &&
+                (net_local_slot() < 0 || net_local_slot() == slot)) {
                 g_currentPlayerIdx = slot;
                 g_localPlayerIndex = slot;
                 /* g_netGameStarted stays 0 on client — DO NOT set to 1 */
@@ -1696,7 +1722,7 @@ void ApplyNetworkPlayerState(void)
         }
 
         if (header == NET_MSG_PEER_NAME && !net_is_host()
-            && len >= 8 + MM_MAX_USERNAME) {
+            && (len == 8 + MM_MAX_USERNAME || len == 8 + MM_MAX_USERNAME + NET_PLATFORM_LEN + 1)) {
             /* Host informed us a peer joined (or changed name). Update the
              * decoration entry + name cache for that slot so lobby/HUD show
              * the real name. */
@@ -1723,20 +1749,27 @@ void ApplyNetworkPlayerState(void)
         }
 
         /* ---- SDL: host says start the game ---- */
-        if (header == NET_MSG_START_GAME && !net_is_host() && len >= 8
+        if (header == NET_MSG_START_GAME && !net_is_host() && (len == 8 || len == 16 || len == 24)
             && g_netGameStarted == 0) {
-            /* Wire-supplied count. g_netPlayerCount bounds loops that index
-             * g_playerBase[], s_playerRecvFlags[], g_perPlayerInput[],
-             * s_netInputBuffer[] and g_netPlayerRecvd[] without their own
-             * guard, so an out-of-range value here is an out-of-bounds write.
-             * Clamp rather than assert: this is remote input, and aborting on
-             * a malformed packet would just be a denial of service. */
+            /* Validate the whole control before changing any session state.
+             * Counts/configuration become array bounds in level setup. */
             int playerCount = rl32s(buf + 4);
-            if (playerCount < 0 || playerCount > NET_MAX_PLAYERS) {
-                fprintf(stderr,
-                        "net: START_GAME playerCount %d out of range [0,%d], clamping\n",
-                        playerCount, NET_MAX_PLAYERS);
-                playerCount = (playerCount < 0) ? 0 : NET_MAX_PLAYERS;
+            if (playerCount < 2 || playerCount > NET_MAX_PLAYERS ||
+                g_localPlayerIndex < 1 || g_localPlayerIndex >= playerCount) continue;
+            if (len >= 16 && !net_valid_config(buf + 8)) continue;
+            if (len == 24) {
+                int valid = 1;
+                for (int k = 0; k < playerCount; ++k) {
+                    int cid = rl16s(buf + 16 + k * 2);
+                    if (cid < 0 || cid >= CHAR_COUNT) valid = 0;
+                }
+                if (!valid) continue;
+            }
+            /* A duplicate START only re-ACKs; it must not reset a live race. */
+            if (g_netSessionActive) {
+                char ack[4]; wl32(ack, NET_MSG_START_ACK);
+                net_send_to_host(ack, sizeof(ack));
+                continue;
             }
             g_netPlayerCount = playerCount;
 
@@ -1748,6 +1781,12 @@ void ApplyNetworkPlayerState(void)
                 g_netRaceSubModeIndex = rl16s(buf + 10);
                 g_netWeatherType      = (int)rl16s(buf + 12);
                 g_netPlayerMode       = (int)rl16s(buf + 14);
+                /* InitNetworkGame reads these same fields through the
+                 * original address aliases. START is authoritative even if
+                 * the preceding lobby broadcast was lost or reordered. */
+                g_netGameInfoDest[1] = (int)rl32u(buf + 8);
+                g_netGameInfoDest[2] = (int)rl32u(buf + 12);
+                g_netReceivedLobbyData = 0;
             }
 
             /* Unpack per-player character IDs. Binary propagated these
@@ -1761,7 +1800,8 @@ void ApplyNetworkPlayerState(void)
                      * g_charStatsTable + charId*10 at call sites that do not
                      * all bounds-check (camera_per_track.c:1797,
                      * player_camera.c:199, physics_main.c:394/410/519/564).
-                     * Clamp remote input rather than trust it. */
+                     * Active slots were validated above; ignore invalid IDs
+                     * in unused slots as previous versions did. */
                     short cid = rl16s(buf + 16 + k * 2);
                     if (cid < 0 || cid >= CHAR_COUNT) {
                         fprintf(stderr,
@@ -1817,7 +1857,7 @@ void ApplyNetworkPlayerState(void)
         }
 
         /* ---- Character change (NET_MSG_CHAR_CHANGE) ---- */
-        if (header == NET_MSG_CHAR_CHANGE && len >= 8) {
+        if (header == NET_MSG_CHAR_CHANGE && len == 8) {
             short slot   = rl16s(buf + 4);
             short charId = rl16s(buf + 6);
             /* charId is used as a table index downstream and not every call
@@ -1827,7 +1867,7 @@ void ApplyNetworkPlayerState(void)
                         (int)charId);
                 continue;
             }
-            if (slot >= 0 && slot < NET_MAX_PLAYERS) {
+            if (slot >= 0 && slot < NET_MAX_PLAYERS && (!net_is_host() || slot == from_slot)) {
                 net_apply_char_id(slot, charId);
                 /* Also update decoration table so host has it for START_GAME */
                 *(int *)(g_netPlayerDecorations + slot * NET_DECO_STRIDE + NET_DECO_LOBBYCHAR) = (int)charId;
@@ -1841,7 +1881,8 @@ void ApplyNetworkPlayerState(void)
         }
 
         /* ---- Lobby config broadcast (0xFFF02000) ---- */
-        if (header == 0xFFF02000u && len >= 0x30) {
+        if (header == 0xFFF02000u && len == 0x30 && !net_is_host() &&
+            !g_netSessionActive && net_valid_config(buf + 4)) {
             /* Host sends g_netGameInfoDest (48 bytes) every 32 frames.
              * Binary: DirectPlay delivered this via EnumSessions callback
              * into g_netLobbyConfigBuf, then set g_netReceivedLobbyData=1
@@ -1856,7 +1897,7 @@ void ApplyNetworkPlayerState(void)
             uint16_t seq = rl16u(buf + 4);
             unsigned short inputBits = rl16u(buf + 6);
             uint8_t playerIdx = *(uint8_t *)(buf + 8);
-            if (playerIdx < NET_MAX_PLAYERS &&
+            if (playerIdx == from_slot && playerIdx < NET_MAX_PLAYERS &&
                 g_playerBase[playerIdx].netActive != 0 &&
                 (int16_t)(seq - s_lastRecvInputSeq[playerIdx]) > 0) {
 #if NET_PEER_AUTHORITATIVE
@@ -1902,7 +1943,7 @@ void ApplyNetworkPlayerState(void)
             continue;
         }
 
-        if (header == NET_MSG_SNAPSHOT && len >= SNAP_HEADER_SIZE) {
+        if (header == NET_MSG_SNAPSHOT && len >= SNAP_HEADER_SIZE && !net_is_host()) {
             int accepted = 0;
             if (g_netGameStarted == 0) {
                 accepted = net_apply_snapshot(buf, len);
@@ -1925,10 +1966,10 @@ void ApplyNetworkPlayerState(void)
         if (g_netGameStarted != 0) {
             /* Lobby phase — binary: cmp [0x68ACE4], 0; jne */
 
-            if (header == 0xFF00000Fu && len >= 16) {
+            if (header == 0xFF00000Fu && len == 16 && net_is_host()) {
                 /* Lobby pad data from client — binary 0x4D9896 */
                 int playerIdx = (int)(unsigned short)rl32u(buf + 8);  /* word in binary */
-                if (playerIdx >= 0 && playerIdx < MAX_PLAYERS) {
+                if (playerIdx == from_slot && playerIdx < NET_MAX_PLAYERS) {
                     /* Check player is active: [playerIdx*0x71C + 0x8FDC08] */
                     if (g_playerBase[playerIdx].netActive != 0) {
                         unsigned short input = rl16u(buf + 0xC);
@@ -1937,10 +1978,10 @@ void ApplyNetworkPlayerState(void)
                     }
                 }
             }
-            else if (header == 0xFFF0004Fu && len >= 12) {
+            else if (header == 0xFFF0004Fu && len == 12) {
                 /* Keepalive — binary 0x4D98DD */
                 int playerIdx = rl32s(buf + 8);
-                if (playerIdx >= 0 && playerIdx < MAX_PLAYERS) {
+                if (playerIdx == from_slot && playerIdx >= 0 && playerIdx < NET_MAX_PLAYERS) {
                     g_netPlayerAlive[playerIdx] = 1;
                     /* Check if all connected players are alive → ready to race */
                     {
@@ -1956,7 +1997,7 @@ void ApplyNetworkPlayerState(void)
         else {
             /* Race phase — binary 0x4D9908 */
 
-            if (header == 0xFFF0003Fu && len >= 0x44) {
+            if (header == 0xFFF0003Fu && len == 0x44 && !net_is_host()) {
                 /* Camera sync — 68 bytes — binary 0x4D9BBD
                  * Per-player camera/race data, plus g_raceFinished update.
                  * Layout: header(4) + perPlayerPos[4*3](48) + racePos[4](4)
@@ -1997,10 +2038,10 @@ void ApplyNetworkPlayerState(void)
                 }
 
             }
-            else if (header == 0xFFF0004Fu && len >= 12) {
+            else if (header == 0xFFF0004Fu && len == 12) {
                 /* Keepalive — binary 0x4D9C98 */
                 int playerIdx = rl32s(buf + 8);
-                if (playerIdx >= 0 && playerIdx < MAX_PLAYERS) {
+                if (playerIdx == from_slot && playerIdx >= 0 && playerIdx < NET_MAX_PLAYERS) {
                     g_netPlayerAlive[playerIdx] = 1;
                     /* Check if all connected players are alive → ready to race */
                     {
@@ -2079,7 +2120,7 @@ void EnumNetworkSessions(int flag)
      * net_client_connect leaves net_local_slot() at -1 until then. The socket
      * is live from the moment we connect, so "active" is not "joined", and
      * broadcasting here beforehand makes CHAR_CHANGE the first packet the host
-     * ever sees from us. ProcessNetworkMessages rightly treats that as fatal.
+     * ever sees from us. The host drops traffic before a valid JOIN.
      * Reachable because callers key off lobby state alone (screen_misc.c:4349)
      * and ns_lobbyState survives leaving and re-entering the network screen. */
     if (!net_is_host() && net_local_slot() < 0) {
