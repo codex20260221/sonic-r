@@ -152,6 +152,7 @@ int          g_mciDeviceId;
 /* Network */
 int          g_localPlayerIndex;
 int          g_netGameStarted;
+int          g_netLanOnly;
 int          g_netPlayerCount;
 
 /* Player — 10 slots × 0x71C bytes each in BSS.

@@ -176,3 +176,25 @@ The baseline profile deliberately exits nonzero after reporting corruption.
 Baseline and repaired profile sender fingerprints must match. See the
 [recovery record](../docs/network-loss-2026-10-24.md) for exact measurements,
 conditional recovery bounds and compatibility limitations.
+
+## Two Windows game instances
+
+After building the development executable, from PowerShell 7:
+
+```powershell
+./tests/windows_lan.ps1
+./tests/windows_lan.ps1 -Status
+./tests/windows_lan.ps1 -Stop
+```
+
+This copies private data into separate ignored host/client directories, copies
+the same executable under distinct names, and launches both with `--lan`.
+The client also receives `--host 127.0.0.1`. No `ONLINE.DAT` is copied and the
+original data is not used as a writable game directory. `-PrepareOnly` prepares
+without launching. The manifest records exact executable paths, SHA-256,
+arguments, PIDs and start times; status/stop verify process identity before use.
+It reuses existing prepared copies and never deletes them. Use a fresh
+`-SessionDirectory` under ignored `source/sdl/build` to recopy changed assets.
+
+Menus still require manual interaction. See the
+[Windows LAN workflow and observed limitations](../docs/windows-lan-2026-10-24.md).

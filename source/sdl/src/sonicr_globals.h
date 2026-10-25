@@ -145,6 +145,7 @@ extern HANDLE       g_netSendEvent;         /* 0x0068AC7C */
 extern int          g_currentPlayerIdx;     /* 0x0068ACD8 — local player DPID from IDirectPlay4::CreatePlayer */
 extern int          g_localPlayerIndex;     /* 0x0068ACDC */
 extern int          g_netGameStarted;       /* 0x0068ACE4 */
+extern int          g_netLanOnly;           /* explicit desktop --lan mode */
 extern int          g_gameDataPacketHeader; /* 0x0068AEC8 */
 extern unsigned short g_gameDataPacketFrame;/* 0x0068AECC */
 extern unsigned short g_netRecvInput[];     /* 0x0068AECE */

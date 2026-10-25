@@ -296,7 +296,8 @@ int JoinNetworkSession(const char *name, int enumIdx)
 /* 0x486C5C — Kick off LAN discovery broadcast */
 void EnumDirectPlaySessions(void)
 {
-    net_discover_send(NET_PORT_DEFAULT);
+    /* An explicit host needs no LAN broadcast or discovery reply. */
+    if (g_cmdHostIP == NULL) net_discover_send(NET_PORT_DEFAULT);
     /* Binary: DirectPlay enumeration callback set g_resultsUnlockFlag when
      * sessions were found. SDL: set it unconditionally so the join path
      * in state 1 can call JoinNetworkSession. */
@@ -522,6 +523,7 @@ int main(int argc, char *argv[])
 
     static struct option long_opts[] = {
         {"host", required_argument, NULL, 'h'},
+        {"lan", no_argument, NULL, 'l'},
         {"port", required_argument, NULL, 'p'},
         {"unlock", no_argument, NULL, 'u'},
         {"fullscreen", no_argument, NULL, 'f'},
@@ -531,6 +533,9 @@ int main(int argc, char *argv[])
     while ((opt = getopt_long(argc, argv, "", long_opts, NULL)) != -1) {
         switch (opt)
         {
+            case 'l':
+                g_netLanOnly = 1;
+                break;
             case 'h':
                 strncpy(s_hostIPArg, optarg, sizeof(s_hostIPArg) - 1);
                 s_hostIPArg[sizeof(s_hostIPArg) - 1] = '\0';

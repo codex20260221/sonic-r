@@ -4899,10 +4899,16 @@ int NetworkScreen(void)
         /* If MatchmakerInit() fails (e.g. compiled-out stub or curl init
          * error), needSignIn starts at 0 so we skip the QR loop and fall
          * straight through to LAN-only lobby flow. */
-        int mmInitOk = MatchmakerInit();
+        if (g_netLanOnly) {
+            MatchmakerClearToken();
+            MatchmakerClearSession();
+            DebugLog("NetworkScreen: --lan, public matchmaking disabled\n");
+        }
+        int mmInitOk = g_netLanOnly ? 0 : MatchmakerInit();
         int needSignIn = (mmInitOk == 1);
         NetDbgClear();
-        NetDbgPush("MM INIT %s", mmInitOk ? "OK" : "FAIL");
+        if (g_netLanOnly) NetDbgPush("LAN ONLY");
+        else NetDbgPush("MM INIT %s", mmInitOk ? "OK" : "FAIL");
         if (needSignIn && MatchmakerLoadToken()) {
             NetDbgPush("TOKEN LOADED");
             if (MatchmakerRefreshToken()) {

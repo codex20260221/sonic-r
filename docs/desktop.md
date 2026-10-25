@@ -45,6 +45,7 @@ put the executable **inside** your data directory and just run it.
 | `--fullscreen`    | Start in fullscreen instead of a window                    |
 | `--unlock`        | Unlock all characters and tracks                           |
 | `--host <ip>`     | Direct-connect network play to a host at `<ip>`            |
+| `--lan`           | Skip public matchmaking/sign-in; use LAN/direct connect    |
 | `--port <n>`      | Network port (default **7847**)                            |
 | `--username <name>` | Set your display name for online play                    |
 
@@ -186,6 +187,14 @@ running the **same build and the same game data**.
 **Cross-play with Dreamcast.** A Dreamcast speaks the identical protocol, so you
 can share a session with Dreamcast players in any combination, as long as everyone
 is on the same version and data.
+
+For an offline LAN session, add `--lan` on every desktop instance; for a direct
+local client, use `--lan --host 127.0.0.1`. This skips public sign-in/token
+loading and matchmaking entirely. F3 in the ordinary sign-in screen appears
+after a code request, so it is not a substitute for `--lan` when no public
+contact is permitted. An explicit `--host` also bypasses discovery broadcasts.
+The [two-instance Windows workflow](windows-lan-2026-10-24.md) isolates writable
+data and documents the manual menus and verification limitations.
 
 ### Signing in and out
 
