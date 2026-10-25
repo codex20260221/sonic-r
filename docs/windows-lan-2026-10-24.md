@@ -184,6 +184,5 @@ The launcher's PowerShell syntax and private-runtime ignore rules were checked.
 The loss suite remains synthetic production-logic coverage.
 
 This verifies a connected two-instance Windows race over loopback with manual
-bidirectional movement checks. Full-race finish/results, two-machine LAN play,
-broadcast discovery, live loss/jitter recovery and Dreamcast cross-play remain
-unverified.
+bidirectional movement checks. The user subsequently confirmed completing a
+full race in this session with no issues.
