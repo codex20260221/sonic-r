@@ -289,6 +289,13 @@ static int s_haveSlotAssign = 0;
 
 static DWORD s_lastHostPacketMs = 0;
 
+/* Lobby config arrives every 64 frames (~2 seconds). Allow several lost
+ * broadcasts; this watch ends at START, before either peer loads a level. */
+static DWORD s_lobbyHostPacketMs = 0;
+static int s_lobbyHostWatching = 0;
+static int s_lobbyHostLost = 0;
+#define NET_LOBBY_HOST_TIMEOUT_MS 15000u
+
 /* Host: per-slot timestamp of last received packet. Used by the host-side
  * stale watchdog to free slots that have gone silent (e.g. crashed clients,
  * NAT remappings) so their slot becomes available to new joiners. */
@@ -1047,12 +1054,14 @@ void SendNetworkPacket(const void *data, int len)
  */
 void CloseDirectPlaySession(void)
 {
-    /* Polite goodbye so the host frees our slot immediately instead of
-     * waiting for its stale-slot watchdog to fire. Best-effort over UDP. */
-    if (net_is_active() && !net_is_host() && s_haveSlotAssign) {
+    /* Best-effort goodbye: release a client's slot or retire a host lobby.
+     * A host finishing a race must not dismiss clients still in that race. */
+    if (net_is_active()) {
         /* Wire: 4 bytes, int header = NET_MSG_LEAVE */
         char _lbuf[4]; wl32(_lbuf, (uint32_t)NET_MSG_LEAVE);
-        net_send_to_host(_lbuf, 4);
+        if (net_is_host()) {
+            if (!g_netSessionActive) net_broadcast(_lbuf, 4);
+        } else if (s_haveSlotAssign) net_send_to_host(_lbuf, 4);
     }
     s_haveSlotAssign = 0;
     memset(s_hostSlotLastRecvMs, 0, sizeof(s_hostSlotLastRecvMs));
@@ -1070,6 +1079,8 @@ void CloseDirectPlaySession(void)
     net_close();
     s_startAckMask = s_levelReadyMask = s_levelGoReceived = 0;
     s_lastHostPacketMs = 0;
+    s_lobbyHostPacketMs = 0;
+    s_lobbyHostWatching = s_lobbyHostLost = 0;
     g_netSessionActive = g_netSessionAlive = g_netSyncEstablished = 0;
     g_netExpectedPlayers = 0;
     g_netReadyFlag = g_netReceivedLobbyData = 0;
@@ -1093,6 +1104,23 @@ void NetLobbyReset(void)
     memset(s_netSlotPlatform, 0, sizeof(s_netSlotPlatform));
     memset(s_netSlotRegion, 0, sizeof(s_netSlotRegion));
     memset(g_netPlayerDecorations, 0, NET_MAX_PLAYERS * NET_DECO_STRIDE);
+}
+
+/* Called only by the lobby UI. Include the unassigned JOIN wait, and keep
+ * this deadline independent of UI activity and the in-race watchdog. */
+int NetLobbyHostLost(void)
+{
+    if (!net_is_active() || net_is_host() || g_netSessionActive) return 0;
+    DWORD now = timeGetTime();
+    if (!s_lobbyHostWatching) {
+        s_lobbyHostPacketMs = now;
+        s_lobbyHostWatching = 1;
+    }
+    if (!s_lobbyHostLost && (DWORD)(now - s_lobbyHostPacketMs) >= NET_LOBBY_HOST_TIMEOUT_MS) {
+        DebugLog("Client: lobby host silent for %ums\n", (unsigned)(now - s_lobbyHostPacketMs));
+        s_lobbyHostLost = 1;
+    }
+    return s_lobbyHostLost;
 }
 
 /**
@@ -1539,18 +1567,23 @@ void ApplyNetworkPlayerState(void)
                  !net_slot_is_connected(from_slot))) continue;
         } else {
             if (from_slot != 0) continue;
-            if (header != NET_MSG_SLOT_ASSIGN &&
+            if (s_lobbyHostLost) return;
+            if (header != NET_MSG_SLOT_ASSIGN && header != NET_MSG_LEAVE &&
                 (!s_haveSlotAssign || net_local_slot() < 1)) continue;
         }
 
-        /* Polite client goodbye: only an established sender can free its
-         * own slot, without waiting for the stale-slot watchdog. */
-        if (net_is_host() && header == NET_MSG_LEAVE && len == 4) {
-            if (from_slot >= 1 && from_slot < NET_MAX_PLAYERS) {
+        /* Only established endpoints can leave. A host can retire its lobby,
+         * but a delayed lobby LEAVE must not abort loading or a live race. */
+        if (header == NET_MSG_LEAVE && len == 4) {
+            if (net_is_host() && from_slot >= 1 && from_slot < NET_MAX_PLAYERS) {
                 DebugLog("Host: slot %d sent LEAVE\n", from_slot);
                 net_unregister_slot(from_slot);
                 s_hostSlotLastRecvMs[from_slot] = 0;
                 host_release_slot_identity(from_slot);
+            } else if (!net_is_host() && !g_netSessionActive) {
+                DebugLog("Client: host left lobby\n");
+                s_lobbyHostLost = 1;
+                return; /* Do not apply a queued START from this lobby. */
             }
             continue;
         }
@@ -1743,6 +1776,8 @@ void ApplyNetworkPlayerState(void)
                 DebugLog("Client: SLOT_ASSIGN slot=%d, host='%s'\n",
                          slot, net_get_slot_name(0));
                 s_haveSlotAssign = 1;
+                s_lobbyHostPacketMs = timeGetTime();
+                s_lobbyHostWatching = 1;
             }
             continue;
         }
@@ -1909,12 +1944,14 @@ void ApplyNetworkPlayerState(void)
         /* ---- Lobby config broadcast (0xFFF02000) ---- */
         if (header == 0xFFF02000u && len == 0x30 && !net_is_host() &&
             !g_netSessionActive && net_valid_config(buf + 4)) {
-            /* Host sends g_netGameInfoDest (48 bytes) every 32 frames.
+            /* Host sends g_netGameInfoDest (48 bytes) every 64 frames.
              * Binary: DirectPlay delivered this via EnumSessions callback
              * into g_netLobbyConfigBuf, then set g_netReceivedLobbyData=1
              * so the lobby loop in screen_misc.c would unpack it. */
             { int _j; for (_j = 0; _j < 12; _j++) g_netLobbyConfigBuf[_j] = rl32s(buf + _j * 4); }
             g_netReceivedLobbyData = 1;
+            s_lobbyHostPacketMs = timeGetTime();
+            s_lobbyHostWatching = 1;
             continue;
         }
 

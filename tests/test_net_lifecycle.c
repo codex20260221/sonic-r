@@ -14,6 +14,8 @@ static int menu_frames, menu_exit, menu_role, menu_active;
 static net_socket_t menu_peer;
 static int server_port;
 static int stage;
+static int menu_rejoins;
+static uint64_t menu_old_generation;
 static jmp_buf menu_checkpoint;
 static unsigned char menu_models[32 * 0x44];
 int g_saveBlock[554];
@@ -77,7 +79,7 @@ void UpdateFade(void)
 
 void ReadInput(void)
 {
-    CHECK(menu_active && ++menu_frames < 100);
+    CHECK(menu_active && ++menu_frames < 400);
     memset(g_diKeyboardState, 0, 256);
     g_inputBits = 0;
     if (stage == 0) {
@@ -103,9 +105,26 @@ void ReadInput(void)
         struct sockaddr_in peer_address = bound_address(menu_peer);
         int slot = find_slot(&peer_address);
         CHECK(menu_role ? (slot > 0 && net_slot_is_connected(slot)) : s_haveSlotAssign);
+        if (menu_old_generation) {
+            CHECK(!net_peer_is_current(0, menu_old_generation));
+            int length = control_packet(packet, NET_MSG_START_GAME);
+            net_enqueue(packet, length, 0, menu_old_generation);
+            pump();
+            CHECK(!g_netSessionActive && !s_startAckMask && !s_levelReadyMask && !s_levelGoReceived);
+            menu_old_generation = 0;
+        }
         stage = 2;
     } else if (stage == 2) {
-        if (menu_exit == 0) now_ms += 181000;
+        if (menu_exit == 0) {
+            now_ms += 181000;
+            /* Exercise the UI's own idle deadline with a live host. */
+            if (!menu_role) {
+                char packet[NET_MAX_PACKET];
+                int length = control_packet(packet, 0xfff02000u);
+                struct sockaddr_in address = bound_address(s_socket);
+                raw_send(menu_peer, &address, packet, length); pump();
+            }
+        }
         else if (menu_exit == 1) g_diKeyboardState[0x01] = 1;
         else if (menu_exit == 2) {
             char packet[NET_MAX_PACKET];
@@ -118,6 +137,19 @@ void ReadInput(void)
                 wl32(packet + 4, 2); raw_send(menu_peer, &address, packet, length);
             }
             stage = 3;
+        } else if (menu_exit == 4) {
+            menu_old_generation = s_playerGeneration[0];
+            char packet[4]; wl32(packet, NET_MSG_LEAVE);
+            struct sockaddr_in address = bound_address(s_socket);
+            raw_send(menu_peer, &address, packet, sizeof(packet)); pump();
+            stage = 3;
+        } else if (menu_exit == 5 || menu_exit == 6) {
+            menu_old_generation = s_playerGeneration[0];
+            /* A dead server and a lost departure notification must both
+             * recover without waiting for the 180-second UI idle timer. */
+            if (menu_exit == 5) { NET_CLOSESOCKET(menu_peer); menu_peer = NET_INVALID_SOCKET; }
+            now_ms += 15000;
+            stage = 3;
         }
     }
 }
@@ -127,6 +159,31 @@ void WaitForFrameCap(void)
     now_ms += 34;
     if (s_threadRunning) usleep(1000);
     if (menu_exit == 3 && stage >= 2) longjmp(menu_checkpoint, 1);
+    if (menu_exit >= 4 && stage == 3) {
+        printf("waiting client recovery: reason=%d active=%d lobby=%d\n",
+               menu_exit, net_is_active(), g_resultsState);
+        CHECK(!net_is_active() && !s_haveSlotAssign);
+        CHECK(g_resultsState == 0 && g_netCharSelectState == 0 && g_stateBlock92528C[4] == 0);
+        CHECK(!g_netPlayerCount && !s_startAckMask && !s_levelReadyMask && !s_levelGoReceived);
+        CHECK(s_queueHead == s_queueTail);
+        if (menu_rejoins) {
+            /* Recreate the host on the very same endpoint, while the client
+             * stays in this invocation of the production menu loop. */
+            if (socket_is_valid(menu_peer)) NET_CLOSESOCKET(menu_peer);
+            menu_peer = socket(AF_INET, SOCK_DGRAM, 0);
+            CHECK(socket_is_valid(menu_peer));
+            struct sockaddr_in address;
+            memset(&address, 0, sizeof(address)); address.sin_family = AF_INET;
+            address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            address.sin_port = htons((uint16_t)server_port);
+            CHECK(bind(menu_peer, (struct sockaddr *)&address, sizeof(address)) == 0);
+            CHECK(set_nonblocking(menu_peer) == 0);
+            --menu_rejoins;
+            menu_exit = menu_rejoins ? 4 + (3 - menu_rejoins) % 3 : 2;
+            stage = 0;
+            g_totalFrames = 0; /* reach the next discovery poll immediately */
+        } else longjmp(menu_checkpoint, 1);
+    }
 }
 
 static int invoke_menu(int reentry, int role, int exit_kind)
@@ -149,6 +206,7 @@ static void prepare_menu(int role)
     real_mode = 1;
     CHECK(net_transport_init() == 0);
     reset_fixture(role);
+    menu_rejoins = 0; menu_old_generation = 0;
     menu_peer = raw_peer();
     server_port = ntohs(bound_address(menu_peer).sin_port);
 }
@@ -168,11 +226,133 @@ static void test_menu_exit(int reentry, int role, int exit_kind)
         CHECK(result == (exit_kind ? SCREEN_BACK : SCREEN_TITLE));
         CHECK(!net_is_active() && !socket_is_valid(s_socket) && !socket_is_valid(s_discoverSocket));
         CHECK(!s_threadRunning && s_playerCount == 0);
-        if (!role) expect_raw_header(menu_peer, NET_MSG_LEAVE, 4);
+        expect_raw_header(menu_peer, NET_MSG_LEAVE, 4);
     }
     CloseDirectPlaySession();
     NET_CLOSESOCKET(menu_peer); real_mode = 0; ++cases;
 }
+
+static void test_waiting_host_departure(int reentry, int reason)
+{
+    prepare_menu(0);
+    (void)invoke_menu(reentry, 0, reason);
+    CloseDirectPlaySession();
+    if (socket_is_valid(menu_peer)) NET_CLOSESOCKET(menu_peer);
+    real_mode = 0; ++cases;
+}
+
+static void test_client_recovery(int reentry)
+{
+    prepare_menu(0); menu_rejoins = 3;
+    CHECK(invoke_menu(reentry, 0, 4) == SCREEN_OK);
+    CHECK(g_netSessionActive && net_is_active() && net_local_slot() == 1 && g_netPlayerCount == 2);
+    CHECK(!s_levelReadyMask && !s_levelGoReceived);
+    expect_raw_header(menu_peer, NET_MSG_START_ACK, 4);
+    char packet[4]; wl32(packet, NET_MSG_LEVEL_GO);
+    struct sockaddr_in address = bound_address(s_socket);
+    raw_send(menu_peer, &address, packet, sizeof(packet));
+    NetLevelSyncBarrier();
+    CHECK(s_levelGoReceived);
+    expect_raw_header(menu_peer, NET_MSG_LEVEL_READY, 4);
+    CloseDirectPlaySession(); NET_CLOSESOCKET(menu_peer); real_mode = 0; ++cases;
+}
+
+static void test_client_leave_rejoin(int reentry)
+{
+    prepare_menu(1); (void)invoke_menu(reentry, 1, 3);
+    struct sockaddr_in address = bound_address(s_socket);
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        char packet[56]; wl32(packet, NET_MSG_LEAVE);
+        raw_send(menu_peer, &address, packet, 4); pump();
+        CHECK(!net_slot_is_connected(1) && g_netPlayerCount == 1);
+        make_join(packet, "lifecycle_client"); raw_send(menu_peer, &address, packet, sizeof(packet)); pump();
+        CHECK(net_slot_is_connected(1) && g_netPlayerCount == 2);
+    }
+    char packet[4]; wl32(packet, NET_MSG_START_ACK);
+    raw_send(menu_peer, &address, packet, sizeof(packet)); InitNetworkGame();
+    CHECK(s_startAckMask == 3);
+    wl32(packet, NET_MSG_LEVEL_READY); raw_send(menu_peer, &address, packet, sizeof(packet));
+    NetLevelSyncBarrier(); CHECK(s_levelReadyMask == 3);
+    expect_raw_header(menu_peer, NET_MSG_LEVEL_GO, 4);
+    CloseDirectPlaySession(); NET_CLOSESOCKET(menu_peer); real_mode = 0; ++cases;
+}
+
+#ifdef SONICR_TEST_LOBBY_LIVENESS
+static void test_lobby_liveness(int reentry)
+{
+    prepare_menu(0); (void)invoke_menu(reentry, 0, 3);
+    char packet[NET_MAX_PACKET];
+    struct sockaddr_in address = bound_address(s_socket);
+    net_socket_t outsider = raw_peer();
+    wl32(packet, NET_MSG_LEAVE);
+    AuthorityState before = capture_authority();
+    raw_send(outsider, &address, packet, 4); pump();
+    unchanged(&before, "unknown endpoint abandoned client lobby");
+    for (int length = 0; length <= 5; ++length) {
+        if (length == 4) continue;
+        raw_send(menu_peer, &address, packet, length); pump();
+        CHECK(!NetLobbyHostLost());
+    }
+    /* Repeated loss bursts below the deadline cannot accumulate into a
+     * disconnect while valid host configuration continues to arrive. */
+    for (int cycle = 0; cycle < 6; ++cycle) {
+        now_ms += 14000; CHECK(!NetLobbyHostLost());
+        int length = control_packet(packet, 0xfff02000u);
+        raw_send(menu_peer, &address, packet, length); pump();
+        CHECK(!NetLobbyHostLost());
+    }
+    now_ms += 14999;
+    int length = control_packet(packet, 0xfff02000u);
+    wl16(packet + 4, 0xffff); /* authenticated but invalid config is not a heartbeat */
+    raw_send(menu_peer, &address, packet, length); pump(); CHECK(!NetLobbyHostLost());
+    now_ms += 1; CHECK(NetLobbyHostLost());
+    /* Once lost, even a queued valid START cannot resurrect this session. */
+    length = control_packet(packet, NET_MSG_START_GAME);
+    raw_send(menu_peer, &address, packet, length); pump(); CHECK(!g_netSessionActive);
+    CloseDirectPlaySession(); CHECK(!NetLobbyHostLost());
+    NET_CLOSESOCKET(menu_peer); NET_CLOSESOCKET(outsider); real_mode = 0; ++cases;
+}
+
+static void test_lobby_clock(DWORD start)
+{
+    prepare_menu(0); (void)invoke_menu(0, 0, 3);
+    now_ms = start;
+    char packet[NET_MAX_PACKET]; int length = control_packet(packet, NET_MSG_SLOT_ASSIGN);
+    struct sockaddr_in address = bound_address(s_socket);
+    raw_send(menu_peer, &address, packet, length); pump();
+    now_ms += 14999; CHECK(!NetLobbyHostLost());
+    now_ms += 1; CHECK(NetLobbyHostLost());
+    CloseDirectPlaySession();
+    /* A new JOIN whose assignment never arrives is bounded too. */
+    CHECK(net_client_connect("127.0.0.1", server_port) == 0);
+    CHECK(!s_haveSlotAssign && !NetLobbyHostLost());
+    now_ms += 15000; CHECK(NetLobbyHostLost());
+    CloseDirectPlaySession();
+    CHECK(net_client_connect("127.0.0.1", server_port) == 0);
+    address = bound_address(s_socket);
+    wl32(packet, NET_MSG_LEAVE);
+    raw_send(menu_peer, &address, packet, 4); pump();
+    CHECK(!s_haveSlotAssign && NetLobbyHostLost()); /* assignment may have been lost */
+    CloseDirectPlaySession(); NET_CLOSESOCKET(menu_peer); real_mode = 0; ++cases;
+}
+
+static void test_loading_and_race(int reentry)
+{
+    prepare_menu(0); CHECK(invoke_menu(reentry, 0, 2) == SCREEN_OK);
+    char packet[NET_MAX_PACKET]; wl32(packet, NET_MSG_LEAVE);
+    struct sockaddr_in address = bound_address(s_socket);
+    now_ms += 300000; /* legitimate loading can take arbitrarily longer */
+    raw_send(menu_peer, &address, packet, 4); pump();
+    CHECK(g_netSessionActive && !g_netDisconnectFlag && !NetLobbyHostLost());
+    int length = snapshot(packet, 1, 1);
+    raw_send(menu_peer, &address, packet, length); pump();
+    CHECK(s_lastHostPacketMs == now_ms);
+    g_introCountdown = 0;
+    now_ms += 5000; pump(); CHECK(!g_netDisconnectFlag);
+    now_ms += 1; pump(); CHECK(g_netDisconnectFlag); /* existing race watchdog */
+    CloseDirectPlaySession(); NET_CLOSESOCKET(menu_peer); real_mode = 0; ++cases;
+}
+#endif
 
 static void test_recreation(int reentry)
 {
@@ -289,6 +469,26 @@ int main(int argc, char **argv)
     if (!strcmp(which, "all") || !strcmp(which, "queue"))
         for (int reentry = 0; reentry <= 1; ++reentry) test_abandoned_queue(reentry);
     if (!strcmp(which, "all") || !strcmp(which, "resources")) test_resource_cycles();
+    for (int reentry = 0; reentry <= 1; ++reentry) {
+        if (!strcmp(which, "all") || !strcmp(which, "rejoin")) {
+            test_client_recovery(reentry);
+            test_client_leave_rejoin(reentry);
+        }
+#ifdef SONICR_TEST_LOBBY_LIVENESS
+        if (!strcmp(which, "all") || !strcmp(which, "liveness")) test_lobby_liveness(reentry);
+        if (!strcmp(which, "all") || !strcmp(which, "loading")) test_loading_and_race(reentry);
+#endif
+    }
+#ifdef SONICR_TEST_LOBBY_LIVENESS
+    if (!strcmp(which, "all") || !strcmp(which, "liveness")) {
+        test_lobby_clock(0);
+        test_lobby_clock(UINT32_MAX - 7000);
+    }
+#endif
+    for (int reentry = 0; reentry <= 1; ++reentry)
+        for (int reason = 4; reason <= 6; ++reason)
+            if (!strcmp(which, "all") || !strcmp(which, reason == 4 ? "departure" : "liveness"))
+                test_waiting_host_departure(reentry, reason);
     for (int reentry = 0; reentry <= 1; ++reentry)
         for (int role = 0; role <= 1; ++role)
             for (int kind = 0; kind < 3; ++kind)

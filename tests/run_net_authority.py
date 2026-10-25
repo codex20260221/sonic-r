@@ -22,7 +22,7 @@ def main(harness="authority"):
         parser.add_argument("--lobby-source", type=Path, default=REPO / "source/sdl/src/screen_misc.c")
         parser.add_argument("--main-source", type=Path, default=REPO / "source/sdl/src/main.c")
     parser.add_argument("--case", default="all",
-                        choices=(("all", "timeout", "escape", "handoff", "reset", "recreate", "queue", "resources") if harness == "lifecycle" else
+                        choices=(("all", "timeout", "escape", "handoff", "reset", "recreate", "queue", "resources", "departure", "liveness", "rejoin", "loading") if harness == "lifecycle" else
                                  ("all", "valid", "input", "snapshot", "control", "fields", "malformed",
                                   "stale", "loopback", "crash", "barrier", "wait")))
     parser.add_argument("--sanitize", action="store_true")
@@ -42,6 +42,8 @@ def main(harness="authority"):
         if ("int net_recv_packet(" in args.transport_source.read_text(encoding="utf-8") and
                 "pkt->generation" in args.source.read_text(encoding="utf-8")):
             definitions += ["SONICR_TEST_GENERATIONS"]
+        if "int NetLobbyHostLost(void)" in args.source.read_text(encoding="utf-8"):
+            definitions += ["SONICR_TEST_LOBBY_LIVENESS"]
         if msvc:
             prefix = args.ucrt64_dir
             if prefix is None:
@@ -113,11 +115,12 @@ def main(harness="authority"):
         environment = os.environ.copy()
         if msvc:
             environment["PATH"] = str(prefix / "bin") + os.pathsep + environment.get("PATH", "")
+        timeout = 45 if harness == "lifecycle" else 20
         try:
             result = subprocess.run([str(binary), args.case], cwd=build, text=True, capture_output=True,
-                                    encoding="utf-8", errors="replace", timeout=20, env=environment)
+                                    encoding="utf-8", errors="replace", timeout=timeout, env=environment)
         except subprocess.TimeoutExpired:
-            raise SystemExit(f"network {harness}: {args.case} timed out (20 seconds)")
+            raise SystemExit(f"network {harness}: {args.case} timed out ({timeout} seconds)")
         print(result.stdout, end="")
         if result.returncode:
             print(result.stderr[-16000:], file=sys.stderr, end="")

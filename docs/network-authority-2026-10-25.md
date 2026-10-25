@@ -339,19 +339,107 @@ To reproduce the pre-fix failures, export `net/network.c`, `net/net_transport.c`
 their paths through the four source options. `--case recreate` and `--case reset`
 deliberately fail on that baseline without game assets or a wall-clock idle wait.
 
-The deterministic defect is corrected. A live retest with the corrected Windows
-executable is the remaining verification step: clean leave/rejoin, host idle
-timeout, host recreation, client rejoin as slot 1 with exactly two players,
-then READY/GO and a complete race. Runtime results will be recorded separately
-from the synthetic cases.
+Subsequent Windows two-instance testing of `132fa4e` reported normal multiplayer
+racing. Closing one participant during a race returned the remaining participant
+to Network. The tester reported that the earlier stale-slot/recreation defect
+appeared corrected. These are observed gameplay results, separate from the
+deterministic timeout/recreation checks above. The same live session exposed
+the host-abandonment defect addressed below.
 
-The current protocol has no host-shutdown control or session nonce. A client
-can remain in its waiting lobby until its own timeout or an explicit leave;
-this correction makes those exits release its local resources. Arbitrarily
-delayed wire packets from an identical reused endpoint, and an established
-peer that never reports level-ready, remain separate limitations. General
-loading-barrier deadlines, full leak analysis and exhaustive thread interleavings
-are not claimed. Other operating systems and Dreamcast were not run.
+At `132fa4e`, LEAVE only handled client departures. A waiting client could
+remain attached after its host left the lobby. That revision cleared local
+resources when the client eventually left, but did not notify it of host loss.
+
+## Host lobby abandonment and waiting-client recovery
+
+### Confirmed defect and reproduction
+
+The live sequence was host creation, client join, host Esc back to the menu,
+then host recreation. The client continued showing waiting for approximately
+20–30 seconds and could not join the new session without leaving manually.
+This did not establish an infinite wait: both lobby loops retain the original
+180-second UI idle timeout, and some menu input restarts that timer.
+
+Source tracing and deterministic loopback tests confirm three gaps:
+
+- Host `CloseDirectPlaySession()` closed its sockets without broadcasting a
+  departure. Only an assigned client sent the existing four-byte LEAVE.
+- The client dispatcher ignored LEAVE from its configured host.
+- The existing five-second host watchdog starts with accepted race snapshots
+  and waits until the intro finishes. It cannot detect a vanished lobby host.
+
+Before production changes, the new `escape`, `departure` and `liveness` cases
+failed on `132fa4e`: no host LEAVE was received, an authorized LEAVE left the
+client active in lobby state 2, and 15 simulated seconds after host disappearance
+still left it active. The final fixture also reproduces the LEAVE failure using
+all four exported sources from that revision. No original assets or external
+network services are involved; raw evidence remains outside Git.
+
+### Correction and compatibility
+
+An abandoning lobby host now broadcasts the existing four-byte LEAVE before
+teardown. A client accepts it only from its configured host endpoint, with the
+exact message length. This also covers a JOIN whose slot assignment was lost.
+Client-to-host LEAVE still releases only the sender's established slot.
+
+A separate lobby watch starts during JOIN and refreshes on valid SLOT_ASSIGN
+or the existing validated 48-byte configuration broadcast. Configuration is
+sent every 64 lobby frames, approximately two seconds at 30 FPS. Fifteen
+seconds without those messages returns the client to Host/Join within Network,
+independent of local input or the 180-second UI idle policy. It allows several
+consecutive lost broadcasts. Malformed messages and unknown endpoints do not
+refresh the deadline. Unsigned elapsed-time checks handle clock zero and wrap.
+
+Recovery uses the existing full close/reset: stop and join the receiver,
+clear queued packets, close sockets, invalidate endpoint generations, and clear
+roster, ACK/READY/GO and pending lobby state. The menu restarts its receiver and
+provider selection without reloading assets. The user can join a recreated
+host in the same game process. Once host loss is recognized, queued START
+controls cannot resurrect the abandoned session.
+
+The lobby watch stops when a valid START makes the session active, before
+level loading. Delayed lobby LEAVE messages are ignored during loading/racing;
+a host completing an active race does not send a lobby-shutdown LEAVE. Existing
+in-race disconnect handling and legitimate client departures are unchanged.
+
+No opcode, packet size, protocol version, binary structure or gameplay timing
+changed. Updated clients can use older hosts' existing configuration messages
+for the silence fallback. Older clients ignore host LEAVE and retain their
+previous waiting behavior; prompt notification requires an updated client.
+The lobby-name display issues remain separate and were not modified.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| Lifecycle suite, GCC / native MSVC AddressSanitizer | 54 cases pass on each; no sanitizer diagnostics |
+| Intentional host exit | Both entry points, Esc and idle closure send LEAVE; authorized host LEAVE returns waiting clients to Host/Join |
+| Unexpected host loss / lost LEAVE | Both entry points recover at the 15-second deadline; unassigned JOIN wait is bounded too |
+| Recovery/rejoin and race startup | Three recoveries to the same host endpoint in each lobby loop, followed by two-player START/ACK/READY/GO; obsolete queued START rejected |
+| Normal client departure/rejoin | Three cycles in each host lobby, followed by ACK/READY masks `0x3` and GO |
+| Loss, malformed traffic, clock boundaries | Repeated 14-second loss bursts with valid configuration stay connected; invalid traffic does not dismiss clients or extend liveness; clock zero/wrap pass |
+| Loading and active-race behavior | Five simulated minutes of loading stay connected; existing five-second race watchdog still passes |
+| Resource/roster/recreation checks | Prior checks pass, including zero Windows handle growth across twelve cycles plus warm-up |
+| Existing authority suite, GCC / native MSVC ASan | 626 cases pass on each |
+| GCC authority suite with `-fanalyzer` | Pass; no analyzer diagnostics |
+| Existing receive / codec / interpolation | 615 / 140 / 5 pass |
+| Existing loss/reordering | 96 scenarios, 8,822 deliveries; fingerprint unchanged at `066e265228162286` |
+| Fresh Windows development build | Pass in `build/lobby-departure-verification` |
+
+Commands and fixture boundaries are in [tests/README.md](../tests/README.md#network-session-lifecycle).
+Live verification of this follow-up correction remains pending: intentional
+host abandonment, client recovery, host recreation and rejoin, successful race
+startup, and unexpected host closure while the client waits. Synthetic loading
+and watchdog checks do not replace an observed gameplay retest.
+
+The protocol still has no session nonce. Arbitrarily delayed wire packets
+whose source and destination endpoints are both reused cannot always be
+distinguished from new traffic. Host disappearance after START but before
+race snapshots, and peers that never report level-ready, retain the existing
+unbounded loading-barrier limitation. This change deliberately applies no
+loading deadline. A stalled host menu or loss of all valid configuration traffic
+for 15 seconds is treated as unreachable. Full leak analysis, exhaustive thread
+interleavings, other operating systems and Dreamcast were not verified.
 
 ## Candidates for the downstream decoded-field audit
 

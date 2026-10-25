@@ -228,7 +228,7 @@ In an x64 MSVC developer environment with the existing UCRT64 prefix configured:
 python tests/run_net_lifecycle.py --cc cl --sanitize --ucrt64-dir "$env:MSYS2_UCRT64"
 ```
 
-The 36 cases run the complete production `screen_misc.c` lobby loops and the
+The 54 cases run the complete production `screen_misc.c` lobby loops and the
 session-creation code in `main.c`, with the actual transport, receiver thread
 and dispatch fixture. A simulated clock reaches the 180-second idle condition
 without waiting. Scripted input selects host/join, Esc or a normal race handoff.
@@ -240,15 +240,28 @@ Coverage includes both lobby entry points as host/client, eight complete
 timeout/recreation/start sequences, twelve resource cycles plus warm-up,
 stale queued JOIN rejection, idempotent teardown, real game/discovery socket
 closure, readiness reset and preservation of the post-race results roster.
+Host Esc/idle closure must send LEAVE. Waiting clients recover to Host/Join
+on an authorized host LEAVE or 15 seconds of silence, including a missing slot
+assignment. Both lobby loops exercise host termination, lost LEAVE, three
+successive recoveries/rejoins to the same host endpoint, and START/READY/GO.
+Valid configuration traffic tolerates repeated 14-second loss bursts; malformed
+or unknown-sender traffic cannot act as a heartbeat or abandon a session.
+Clock-zero/wrap cases cover the deadline. Five simulated minutes of loading
+must not trigger it; the existing five-second in-race watchdog is checked too.
 Windows resource cycles require a zero OS handle-count delta after warm-up.
 The PE linker uses aborting stubs for unrelated functions in the complete
 main/menu translation units. MSVC's temporary headers cover GNU attributes,
 winpthreads, `unistd` and unused command-line declarations. No production
 declarations or asset files are replaced.
 
-`--case timeout`, `escape`, `handoff`, `reset`, `recreate`, `queue` and `resources`
-isolate the scenarios. `--source`, `--transport-source`, `--lobby-source` and
+`--case timeout`, `escape`, `handoff`, `reset`, `recreate`, `queue`, `resources`,
+`departure`, `liveness`, `rejoin` and `loading` isolate the scenarios. The fixture
+has a 45-second process deadline for the expanded threaded cases; production
+lobby liveness uses the independent 15-second deadline above.
+`--source`, `--transport-source`, `--lobby-source` and
 `--main-source` accept exported baselines; export all affected sources together.
+`--case departure` and `liveness` fail against `132fa4e`; API-specific clock and
+loading assertions run only when the selected source provides the lobby watch.
 See the [lifecycle correction record](../docs/network-authority-2026-10-25.md#lifecycle-correction-after-live-verification).
 
 ## Loss, duplication and reordering

@@ -31,7 +31,7 @@
 #define NET_MSG_START_ACK   0xFFF00035   /* client → host: ack start race */
 #define NET_MSG_CHAR_CHANGE 0xFFF00040   /* any → all: character selection changed */
 #define NET_MSG_PEER_NAME   0xFFF00050   /* host → all clients: peer joined, here is their name */
-#define NET_MSG_LEAVE       0xFFF00060   /* client → host: leaving cleanly, free my slot */
+#define NET_MSG_LEAVE       0xFFF00060   /* client → host: free my slot; host → clients: lobby closed */
 #define NET_MSG_LEVEL_READY 0xFFF00070   /* any → host: finished loading, ready for race */
 #define NET_MSG_LEVEL_GO    0xFFF00080   /* host → all: all peers loaded, enter countdown */
 
@@ -158,6 +158,7 @@ int net_transport_init(void);
 /* Enter a fresh lobby after any previous race/results screen. Retires the
  * old transport and clears lobby identities, without changing saved options. */
 void NetLobbyReset(void);
+int NetLobbyHostLost(void); /* lobby-only host departure / liveness check */
 
 /**
  * Host: bind a UDP socket on the given port and begin accepting clients.

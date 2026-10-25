@@ -4386,6 +4386,19 @@ static unsigned int s_charResendSec;
 #define NS_STR_MODEM_SESSION  "ModemSession"      /* 0x53043F */
 #define NS_STR_JOIN_SESSION   "JoinSession"       /* 0x530438 */
 
+/* Return a waiting client to Host/Join without reloading menu assets. The
+ * full close/reset retires the receiver, endpoints and queued old controls. */
+static void NetLobbyReturnToMenu(void)
+{
+    extern int g_netEnumActive;
+    NetLobbyReset();
+    ns_lobbyState = ns_setupMode = ns_connectionMode = 0;
+    ns_lobbyEntryCount = ns_slotQueueIdx = 0;
+    g_netMenuState = g_netEnumActive = g_netJoinedFlag = g_resultsUnlockFlag = 0;
+    g_netProviderChoice = -1;
+    StartNetworkThread();
+}
+
 /**
  * ShiftLobbyHistory — 0x0048A630 — 112 bytes
  * Shifts entries in the lobby buffer (0x689BB8) upward by 0x104 bytes
@@ -5267,6 +5280,12 @@ int NetworkScreen(void)
          * are processed during the lobby. Binary's recv thread handled
          * this; our thread enqueues but the main thread must dispatch. */
         ApplyNetworkPlayerState();
+
+        if (NetLobbyHostLost()) {
+            NetLobbyReturnToMenu();
+            lastTickSec = timeGetTime() / 1000;
+            goto render_frame;
+        }
 
         /* If fade active (g_fadeState != 0), skip to render */
         if (g_fadeState != 0) {                               /* 0x48AC33 */
@@ -6371,6 +6390,12 @@ int NetworkScreenReentry(void)
         ReadInput();
         NetSynthPadKeys();
         ApplyNetworkPlayerState();
+
+        if (NetLobbyHostLost()) {
+            NetLobbyReturnToMenu();
+            lastTickSec = timeGetTime() / 1000;
+            goto render_frame_re;
+        }
 
         if (g_fadeState != 0) {
             goto render_frame_re;
