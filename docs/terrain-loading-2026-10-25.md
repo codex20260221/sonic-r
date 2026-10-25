@@ -120,9 +120,48 @@ published scalars, the collision-mesh extent and every loaded byte. Both the
 baseline and correction pass these comparisons for all five original files.
 Private file paths, assets and raw evidence are absent from this commit.
 
-These are loader, compatibility and build results. Gameplay with the corrected
-executable has not been rerun. Big-endian and Dreamcast execution were not
-available; their fixup bounds were reviewed in the shared source. Other asset
-loaders, cross-file AI/geometry references and general physics/numerical
-validity are outside this focused audit. Matching game assets and valid runtime
-player/camera indexes remain assumptions.
+Big-endian and Dreamcast execution were not available; their fixup bounds were
+reviewed in the shared source. Other asset loaders, cross-file AI/geometry
+references and general physics/numerical validity are outside this focused
+audit. Matching game assets and valid runtime player/camera indexes remain
+assumptions.
+
+## Corrected Windows gameplay verification — 2026-10-25
+
+The development executable at `source/sdl/build/terrain-verification/sonicr.exe`
+was confirmed up to date with the corrected source at `777d52e`. Its SHA-256 was:
+
+```text
+D3EB7BE2C13A153871060CE1BE592DFE556D3929F198C223459420D0D9374C2E
+```
+
+The game reused the existing isolated private runtime copy and was launched
+with `--lan --unlock`. The existing unlock option made all five tracks available
+for the smoke test. The user operated the game window and evaluated gameplay;
+automated checks monitored the owned process and both diagnostic streams.
+
+The verified runs entered through Time Attack and course selection. Each track
+initializer below was followed by `InitLevel OK` and `MAIN GAME LOOP`:
+
+| Track | Initializer | User-observed runtime result |
+| --- | --- | --- |
+| Resort Island | `InitIsland` | Rendered and played normally; no issues |
+| Radical City | `InitCity` | Rendered and played normally; no issues |
+| Regal Ruin | `InitRuin` | Rendered and played normally; no issues |
+| Reactive Factory | `InitFactory` | Rendered and played normally; no issues |
+| Radiant Emerald | `InitEmerald` | Rendered and played normally; no issues |
+
+The user confirmed that all five tracks rendered and played normally, with no
+issues. The complete captured diagnostics contained no terrain-loading failures
+or crash/error messages. The process was responsive at monitoring checkpoints
+and exited with code 0 after the owned test window was closed normally.
+
+All 496 original runtime file paths, sizes and SHA-256 hashes were unchanged
+after the test. The five prepared `.TER` files still matched their originals.
+Raw logs, process records and hash manifests remained outside Git.
+
+Together with the regression, sanitizer and original-file compatibility checks
+above, these results complete verification of the confirmed terrain-loading
+buffer-overflow fix for the current Windows PC target. The issue is considered
+closed in that scope. This was a short gameplay smoke test across all five
+tracks; the broader assumptions listed above remain outside its coverage.
