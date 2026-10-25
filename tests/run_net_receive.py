@@ -16,7 +16,7 @@ def main(harness="receive"):
     parser.add_argument("--cc", default=os.environ.get("CC", "gcc" if os.name == "nt" else "cc"))
     parser.add_argument("--source", type=Path, default=REPO / "source/sdl/src/net/network.c")
     parser.add_argument("--delta-source", type=Path, default=REPO / "source/sdl/src/net/net_delta.c")
-    choices = (("all", "profile", "snapshot", "input", "edges") if harness == "loss" else
+    choices = (("all", "profile", "snapshot", "input", "edges", "input-wrap") if harness == "loss" else
                ("all", "snapshot", "input", "valid", "snapshot-late", "decoder"))
     parser.add_argument("--case", choices=choices, default="all")
     parser.add_argument("--sanitize", action="store_true")

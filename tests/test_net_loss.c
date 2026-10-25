@@ -274,6 +274,7 @@ static void test_input_only_bridge(void)
         wl16(input_only + 4, (uint16_t)(gap ? 12 : 11));
         ReceiveState before = capture();
         edge_dispatch(input_only, sizeof(input_only));
+        if (gap) before.history[1].valid = 0;
         CHECK(memcmp(s_deltaRecv, before.history, sizeof(before.history)) == 0);
         CHECK(memcmp(g_playerBase, before.players, sizeof(before.players)) == 0);
         source_players[1].posX += 100;
@@ -322,6 +323,38 @@ static void test_partial_keyframe_recovery(void)
     }
 }
 
+static void test_input_only_wrap_alias(void)
+{
+    char packet[NET_MAX_PACKET], input_only[12];
+    reset_fixture(1);
+    int len = client_input(packet, 1, 10);
+    edge_dispatch(packet, len);
+    source_players[1].posX += 100;
+    (void)client_input(packet, 0, 11); /* state predecessor lost */
+    memcpy(input_only, packet, sizeof(input_only));
+    input_only[9] = 0;
+    /* Each accepted jump is within the existing 16-bit freshness window.
+     * Absolute input remains usable, but a full wrap cannot repair history. */
+    static const uint16_t sequences[] = {12, 32770, 65520, 10};
+    for (size_t i = 0; i < sizeof(sequences) / sizeof(sequences[0]); ++i) {
+        wl16(input_only + 4, sequences[i]);
+        edge_dispatch(input_only, sizeof(input_only));
+        CHECK(s_lastRecvInputSeq[1] == sequences[i]);
+    }
+    source_players[1].posX += 100;
+    len = client_input(packet, 0, 11);
+    ReceiveState before = capture();
+    edge_dispatch(packet, len);
+    if (g_playerBase[1].posX != before.players[1].posX)
+        fprintf(stderr, "wrapped input-only gap: source=%d decoded=%d (lost predecessor reused)\n",
+                source_players[1].posX, g_playerBase[1].posX);
+    expect_unchanged(&before);
+    len = client_input(packet, 1, 12);
+    edge_dispatch(packet, len);
+    CHECK(g_playerBase[1].posX == source_players[1].posX);
+    ++scenarios;
+}
+
 int main(int argc, char **argv)
 {
     const char *which = argc > 1 ? argv[1] : "all";
@@ -338,6 +371,7 @@ int main(int argc, char **argv)
         test_input_only_bridge();
         test_partial_keyframe_recovery();
     }
+    if (!profile && (all || strcmp(which, "input-wrap") == 0)) test_input_only_wrap_alias();
     CHECK(scenarios != 0);
     printf("network loss: %d scenarios, %d deliveries, unsafe=%d wrong=%d, keyframe-period=%d, "
            "wire-fingerprint=%016llx\n", scenarios, deliveries, unsafe_accepts, wrong_states, PERIOD, wire_hash);

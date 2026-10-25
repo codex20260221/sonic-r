@@ -24,11 +24,12 @@ counterpart; rejected packets must preserve the transaction fixture's complete
 history/player/interpolation/finish/input/sequence/version/frame/timestamp state.
 Independent client streams additionally check that other clients do not change.
 
-The full suite has 95 scenarios and 8,815 deliveries. It includes every one of
+The full suite has 96 scenarios and 8,822 deliveries. It includes every one of
 the 31 isolated-loss phases, initial/periodic/two consecutive lost keyframes,
 bursts spanning keyframes, duplicates, reordering with and without a later
 retransmission, stale/malformed packets, sequence wrap, three clients with
-different sequences, legacy input-only packets, and partial resynchronization.
+different sequences, legacy input-only packets including full-wrap aliases,
+and partial resynchronization.
 
 ## Baseline failures and corrected results
 
@@ -54,6 +55,25 @@ Both profiles produce the same captured sender-byte FNV-1a fingerprint:
 and sender cadence are unchanged. Existing golden wire fixtures still pass.
 Ignored exact outputs are under `source/sdl/build/loss-evidence/`.
 
+Extended testing of the first recovery commit (`28f9191`) found a full-wrap
+alias: after a state predecessor was dropped, accepted input-only sequences
+12, 32770, 65520 and 10 could make a separate continuity cursor match again.
+The next delta decoded source X=1300 as 1200. The final implementation removes
+that cursor and invalidates the existing history confidence on an accepted
+input-only gap. A wrap cannot restore validity; the next valid keyframe does.
+This changes confidence only as part of an accepted absolute-input transaction;
+rejected packets retain the previous transactional guarantees.
+
+Reproduce that additional failure against the first recovery commit:
+
+```powershell
+python -c 'from pathlib import Path; import subprocess; p=Path("source/sdl/build/loss-evidence/pre-input-wrap-network.c"); p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(subprocess.check_output(["git","show","28f9191:source/sdl/src/net/network.c"]))'
+```
+
+```sh
+python tests/run_net_loss.py --cc gcc --source source/sdl/build/loss-evidence/pre-input-wrap-network.c --case input-wrap
+```
+
 ## Receive-only recovery
 
 A relative snapshot requires the next contiguous accepted snapshot sequence.
@@ -62,10 +82,11 @@ client's baseline. Fresh keyframes can bridge a gap. Rejection changes no
 history, player, interpolation sample, finish state or receive sequence.
 There is no speculative application of an unproven delta and no new wire data.
 
-Input freshness and baseline continuity are separate per-client counters.
-An input-only packet can safely update absolute input bits after a gap, but
-cannot pretend that a missing state packet was decoded. Contiguous input-only
-packets account for an unchanged baseline, preserving that legacy form.
+Input freshness is per client, and the history's existing validity flag tracks
+baseline confidence separately. An accepted input-only packet can safely update
+absolute input bits after a gap, but invalidates baseline confidence without
+changing saved field values or any player. Contiguous input-only packets retain
+an already trusted baseline. Only a keyframe can restore an invalid baseline.
 After a keyframe bridges a snapshot gap, only included slots have recovered:
 omitted slots lose baseline validity without changing their players or saved
 field values. A later delta cannot reuse their pre-loss histories.
@@ -73,8 +94,8 @@ field values. A later delta cannot reuse their pre-loss histories.
 No reorder buffer or retransmission request is added. A delayed predecessor
 can still be accepted if it is the next required packet; already rejected
 successors need redelivery or a subsequent keyframe. Snapshot state and the
-three client streams retain separate sequence bookkeeping. Race/session reset
-also resets the new input-baseline continuity counters.
+three client streams retain separate sequence bookkeeping. Existing race/session
+reset clears history validity and receive sequences.
 
 ## Recovery latency and compatibility
 
@@ -102,7 +123,7 @@ without new platform dependencies or changes to binary/save layouts.
 
 ## Validation so far
 
-UCRT64 GCC 16.2.0 on Windows 11: all 95 loss scenarios / 8,815 deliveries pass,
+UCRT64 GCC 16.2.0 on Windows 11: all 96 loss scenarios / 8,822 deliveries pass,
 including `CFLAGS=-fanalyzer` with warnings as errors and no diagnostics.
 The existing 615 receive, 140 codec and 5 interpolation tests still pass.
 This record describes isolated receive logic. Live Windows verification is

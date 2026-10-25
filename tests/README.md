@@ -154,11 +154,12 @@ python tests/run_net_loss.py --cc gcc --case profile
 
 The isolated delivery harness reuses the production packet receiver and actual
 snapshot sender, the production input codec with its existing envelope, and the
-prior transaction fixture. It opens no sockets. The 95 scenarios / 8,815
+prior transaction fixture. It opens no sockets. The 96 scenarios / 8,822
 deliveries cover all 31 loss phases, isolated/burst loss, lost initial/periodic
 and consecutive keyframes, duplicates, reordering with/without retransmission,
 stale and malformed packets, wraparound, independently sequenced clients,
-input-only packets, and partial keyframe recovery. Accepted state is compared
+input-only packets including a full-wrap baseline alias, and partial keyframe
+recovery. Accepted state is compared
 with an uninterrupted authoritative decode; rejected state is compared byte
 for byte with its pre-delivery state.
 
