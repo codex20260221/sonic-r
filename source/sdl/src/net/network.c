@@ -575,71 +575,62 @@ static int net_build_snapshot(char *buf, int maxlen)
     return offset;
 }
 
-static void net_apply_snapshot(const char *buf, int len)
+typedef struct {
+    NetDeltaRecvState history[NET_MAX_PLAYERS];
+    unsigned char slots[NET_MAX_PLAYERS];
+    unsigned char count;
+} NetPendingSnapshot;
+
+/* Validate every declared entry, including the self-authoritative local slot,
+ * without publishing any receive history or player/interpolation state. */
+static int net_decode_snapshot(const char *buf, int len, NetPendingSnapshot *pending)
 {
-    uint16_t seq;
-    uint8_t count;
-    int i, offset;
-    int is_keyframe;
+    int offset = SNAP_HEADER_SIZE;
+    unsigned int seen = 0;
+    if (len < SNAP_HEADER_SIZE) return 0;
+    pending->count = (unsigned char)buf[8];
+    if (pending->count > NET_MAX_PLAYERS) return 0;
 
-    if (len < SNAP_HEADER_SIZE) return;
-
-    seq = rl16u(buf + 4);
-
-    if ((int16_t)(seq - s_lastRecvSnapSeq) <= 0)
-        return;
-    s_lastRecvSnapSeq = seq;
-
-    count = (uint8_t)buf[8];
-    is_keyframe = (buf[9] & 1);
-    net_note_peer_version(0, rl16u(buf + 10));   /* snapshots come from the host, player 0 */
-    if (count > NET_MAX_PLAYERS) count = NET_MAX_PLAYERS;
-
-    offset = SNAP_HEADER_SIZE;
-    for (i = 0; i < (int)count; i++) {
-        int playerIdx;
-        int consumed;
-        Player *pl;
-
-        if (offset >= len) break;
-        playerIdx = (int)(unsigned char)buf[offset];
-        if (playerIdx >= MAX_PLAYERS) break;
-
-        pl = &g_playerBase[playerIdx];
-
-        if (playerIdx == g_localPlayerIndex) {
-#if NET_PEER_AUTHORITATIVE
-            /* Peer-auth: local player is self-authoritative.
-             * Still need to advance past this player's data in the packet. */
-            {
-                NetDeltaRecvState tmp;
-                if (is_keyframe) {
-                    tmp.valid = 0;
-                } else {
-                    tmp = s_deltaRecv[playerIdx];
-                }
-                Player dummy;
-                consumed = net_delta_decode(&tmp, (const unsigned char *)buf + offset,
-                                            len - offset, is_keyframe, &dummy);
-                if (consumed == 0) break;
-                s_deltaRecv[playerIdx] = tmp;
-            }
-#else
-            consumed = net_delta_decode(&s_deltaRecv[playerIdx],
+    for (int i = 0; i < pending->count; ++i) {
+        if (offset >= len) return 0;
+        int playerIdx = (unsigned char)buf[offset];
+        if (playerIdx >= NET_MAX_PLAYERS || (seen & (1u << playerIdx))) return 0;
+        seen |= 1u << playerIdx;
+        pending->slots[i] = (unsigned char)playerIdx;
+        pending->history[i] = s_deltaRecv[playerIdx];
+        int consumed = net_delta_decode(&pending->history[i],
                                         (const unsigned char *)buf + offset,
-                                        len - offset, is_keyframe, pl);
-            if (consumed == 0) break;
+                                        len - offset, buf[9] & 1, NULL);
+        if (consumed == 0) return 0;
+        offset += consumed;
+    }
+    return offset == len;
+}
+
+static int net_apply_snapshot(const char *buf, int len)
+{
+    NetPendingSnapshot pending = {0};
+    if (len < SNAP_HEADER_SIZE) return 0;
+    uint16_t seq = rl16u(buf + 4);
+    if ((int16_t)(seq - s_lastRecvSnapSeq) <= 0) return 0;
+    if (!net_decode_snapshot(buf, len, &pending)) return 0;
+
+    /* No operation below can reject the packet. Commit all slots in wire order
+     * so finish-order ties retain their existing behavior. */
+    for (int i = 0; i < pending.count; ++i) {
+        int playerIdx = pending.slots[i];
+        Player *pl = &g_playerBase[playerIdx];
+        s_deltaRecv[playerIdx] = pending.history[i];
+        if (playerIdx == g_localPlayerIndex) {
+#if !NET_PEER_AUTHORITATIVE
+            net_delta_apply(&s_deltaRecv[playerIdx], pl);
 #endif
-            offset += consumed;
             continue;
         }
 
         {
             short prevLaps = pl->lapsCompleted;
-            consumed = net_delta_decode(&s_deltaRecv[playerIdx],
-                                        (const unsigned char *)buf + offset,
-                                        len - offset, is_keyframe, pl);
-            if (consumed == 0) break;
+            net_delta_apply(&s_deltaRecv[playerIdx], pl);
             if (pl->lapsCompleted == 3 && prevLaps < 3) {
                 int counter = g_finishOrderCounter;
                 pl->trackProgress = (int)(0xFFFFFFFF - (unsigned int)counter);
@@ -647,8 +638,10 @@ static void net_apply_snapshot(const char *buf, int len)
             }
         }
         NetInterpRecord(playerIdx);
-        offset += consumed;
     }
+    s_lastRecvSnapSeq = seq;
+    net_note_peer_version(0, rl16u(buf + 10));
+    return 1;
 }
 
 void net_set_slot_name(int slot, const char *name)
@@ -1852,9 +1845,22 @@ void ApplyNetworkPlayerState(void)
             uint16_t seq = rl16u(buf + 4);
             unsigned short inputBits = rl16u(buf + 6);
             uint8_t playerIdx = *(uint8_t *)(buf + 8);
-            if (playerIdx < MAX_PLAYERS &&
+            if (playerIdx < NET_MAX_PLAYERS &&
                 g_playerBase[playerIdx].netActive != 0 &&
                 (int16_t)(seq - s_lastRecvInputSeq[playerIdx]) > 0) {
+#if NET_PEER_AUTHORITATIVE
+                NetDeltaRecvState pending;
+                if (len > 12) {
+                    /* The body has its own slot byte. Require agreement and
+                     * complete consumption before committing even the input. */
+                    if ((unsigned char)buf[12] != playerIdx) continue;
+                    pending = s_deltaRecv[playerIdx];
+                    int consumed = net_delta_decode(&pending,
+                                        (const unsigned char *)buf + 12,
+                                        len - 12, buf[9] & 1, NULL);
+                    if (consumed == 0 || consumed != len - 12) continue;
+                }
+#endif
                 s_lastRecvInputSeq[playerIdx] = seq;
                 s_netInputBuffer[playerIdx] = inputBits;
                 g_netPlayerRecvd[playerIdx] = 1;
@@ -1864,10 +1870,8 @@ void ApplyNetworkPlayerState(void)
                 if (len > 12) {
                     Player *cpl = &g_playerBase[playerIdx];
                     short prevLaps = cpl->lapsCompleted;
-                    int is_kf = (buf[9] & 1);
-                    net_delta_decode(&s_deltaRecv[playerIdx],
-                                     (const unsigned char *)buf + 12,
-                                     len - 12, is_kf, cpl);
+                    s_deltaRecv[playerIdx] = pending;
+                    net_delta_apply(&s_deltaRecv[playerIdx], cpl);
                     if (cpl->lapsCompleted == 3 && prevLaps < 3) {
                         int counter = g_finishOrderCounter;
                         cpl->trackProgress = (int)(0xFFFFFFFF - (unsigned int)counter);
@@ -1876,6 +1880,25 @@ void ApplyNetworkPlayerState(void)
                     NetInterpRecord((int)playerIdx);
                 }
 #endif
+            }
+            continue;
+        }
+
+        if (header == NET_MSG_SNAPSHOT && len >= SNAP_HEADER_SIZE) {
+            int accepted = 0;
+            if (g_netGameStarted == 0) {
+                accepted = net_apply_snapshot(buf, len);
+            } else if (!net_is_host()) {
+                /* Lobby snapshots historically update only frame/heartbeat
+                 * bookkeeping. Validate them without committing race state. */
+                NetPendingSnapshot pending = {0};
+                accepted = net_decode_snapshot(buf, len, &pending);
+            }
+            if (accepted && !net_is_host()) {
+                uint16_t frame = rl16u(buf + 6);
+                g_gameDataPacketFrame = frame;
+                g_netSessionFrame = (int)frame;
+                s_lastHostPacketMs = timeGetTime();
             }
             continue;
         }
@@ -1915,10 +1938,7 @@ void ApplyNetworkPlayerState(void)
         else {
             /* Race phase — binary 0x4D9908 */
 
-            if (header == NET_MSG_SNAPSHOT && len >= SNAP_HEADER_SIZE) {
-                net_apply_snapshot(buf, len);
-            }
-            else if (header == 0xFFF0003Fu && len >= 0x44) {
+            if (header == 0xFFF0003Fu && len >= 0x44) {
                 /* Camera sync — 68 bytes — binary 0x4D9BBD
                  * Per-player camera/race data, plus g_raceFinished update.
                  * Layout: header(4) + perPlayerPos[4*3](48) + racePos[4](4)
@@ -1976,13 +1996,6 @@ void ApplyNetworkPlayerState(void)
             }
         }
 
-        /* ---- Client-side: update session frame from snapshot ---- */
-        if (header == NET_MSG_SNAPSHOT && len >= SNAP_HEADER_SIZE && !net_is_host()) {
-            uint16_t frame = rl16u(buf + 6);
-            g_gameDataPacketFrame = frame;
-            g_netSessionFrame = (int)frame;
-            s_lastHostPacketMs = timeGetTime();
-        }
     }
 
     if (!net_is_host() && net_is_active() && s_lastHostPacketMs != 0

@@ -111,3 +111,35 @@ history; signed values; staged publication; and literal valid wire fixtures.
 `--source path/to/net_delta.c --case atomic` can reproduce the pre-fix history
 corruption using an exported baseline. `--case valid` checks four golden
 wire/missing-history cases without depending on the new staging API.
+
+## Network packet receive
+
+Run with GCC in UCRT64, or a compatible POSIX compiler on other platforms:
+
+```sh
+python tests/run_net_receive.py --cc gcc
+CFLAGS=-fanalyzer python tests/run_net_receive.py --cc gcc
+```
+
+The 615 cases include every shorter byte length of representative four-player
+keyframe/delta snapshots and client-input packets, complete retransmission
+after failure, malformed count/slot/framing data, local-slot validation,
+missing histories, duplicates/reordering, 16-bit sequence wrap, all supported
+snapshot counts, version-0 markers, input-only packets, lobby frame handling,
+and finish order in arbitrary wire order.
+
+The harness includes the complete production `network.c` and `net_interp.c`
+to inspect private state, links the real codec and game global definitions,
+and calls `ApplyNetworkPlayerState()`. Only the transport, clock, logging and
+unrelated platform calls are stubbed. Unexpected sends/platform work fail;
+no real sockets, matchmaking, receive thread, window or assets are involved.
+Rejected packets must leave all players, receive histories, sequence numbers,
+inputs/receive flags, peer versions, timestamps, session frames, interpolation
+history and finish bookkeeping unchanged.
+
+`--source` and `--delta-source` select exported production sources. The cases
+`snapshot`, `snapshot-late`, `input` and `decoder` isolate the original defects.
+`--sanitize` enables GCC/Clang ASan/UBSan where supported; UCRT64 here lacks
+`libasan`, so packet sanitizer coverage is not claimed. MSVC ASan covers the
+codec separately. These tests do not test real transport or concurrency.
+See [network receive verification](../docs/network-receive-2026-10-24.md).
