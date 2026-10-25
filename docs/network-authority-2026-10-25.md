@@ -427,10 +427,25 @@ The lobby-name display issues remain separate and were not modified.
 | Fresh Windows development build | Pass in `build/lobby-departure-verification` |
 
 Commands and fixture boundaries are in [tests/README.md](../tests/README.md#network-session-lifecycle).
-Live verification of this follow-up correction remains pending: intentional
-host abandonment, client recovery, host recreation and rejoin, successful race
-startup, and unexpected host closure while the client waits. Synthetic loading
-and watchdog checks do not replace an observed gameplay retest.
+
+### Windows live retest
+
+The two-instance loopback retest used the Windows executable from `542d05a`
+and the existing private runtime copies. The operator reported that the tests
+passed and the reported issues no longer occurred. The guided check covered
+host Esc while a client waited, prompt client return to Network's Host/Join
+choices, host recreation, and a two-player rejoin without restarting the games.
+
+Diagnostics confirm the client processed the host's lobby LEAVE and subsequently
+received slot 1 in the recreated session. Both processes were still running
+and responding when checked, with no crash or fatal-error diagnostics observed.
+All 496 original runtime files matched the pre-test snapshot in SHA-256, size
+and modification time. Raw logs and integrity evidence remain outside Git.
+
+The reported host-abandonment/waiting-client defect is considered resolved.
+The lost-notification deadline, unexpected host disappearance and loading/race
+watchdog boundaries retain the deterministic verification recorded above;
+their exact wall-clock timing was not measured in this live check.
 
 The protocol still has no session nonce. Arbitrarily delayed wire packets
 whose source and destination endpoints are both reused cannot always be
