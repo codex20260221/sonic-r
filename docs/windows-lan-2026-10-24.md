@@ -1,6 +1,6 @@
 # Two-instance Windows LAN workflow — 2026-10-24
 
-Use the existing branch `codex/windows-playable-20261024`, MSYS2 UCRT64,
+Use the currently authorized branch, MSYS2 UCRT64,
 PowerShell 7 and your privately supplied PC game-data directory. Pass `-DataDirectory` to the launcher or set the `SONICR_DATA_DIR` environment variable in your PowerShell session before running it.
 
 For example:
@@ -59,8 +59,8 @@ do not use ordinary sign-in as the entry path for this test.
 
 ## Manual host/client menu workflow
 
-These steps are derived from the production menu state machine; the connected
-session portion has not been executed in this environment.
+These steps are derived from the production menu state machine. The connected
+session was subsequently exercised in the 2026-10-25 verification below.
 
 1. Focus each game window and press Enter through the logos/title. If attract
    playback has begun, return to the title/menu before proceeding.
@@ -118,24 +118,72 @@ different process by name or removes private data. Close a stuck owned window
 manually. The launcher was corrected for PowerShell 7's automatic JSON date
 conversion so its identity check compares UTC ticks rather than display strings.
 
-## What was actually observed
+## Initial observations — 2026-10-24
 
 Both real Windows instances were launched from the same development binary,
-with separate data and identical executable hashes. Recorded first-run PIDs
-were host 44568 and client 43672. Both exposed `Sonic R` windows and logged
-the logos, title, `InitLevel OK` and `MAIN GAME LOOP` during independent
-attract-mode playback. The launcher status and safe close workflow were run.
+with separate data and identical executable hashes. Both exposed `Sonic R`
+windows and logged the logos, title, `InitLevel OK` and `MAIN GAME LOOP` during
+independent attract-mode playback. The launcher status and safe close workflow were run.
 All 496 source runtime file hashes remained unchanged after the run.
 
-**No connected host/client session was observed.** Neither instance entered
-the Network menu; there were no owned UDP endpoints, JOIN/SLOT_ASSIGN/start/GO
-evidence, or live synchronization observations. Independent attract playback
+**No connected host/client session was observed in the initial run.** Neither
+instance entered the Network menu; there were no owned UDP endpoints,
+JOIN/SLOT_ASSIGN/start/GO evidence, or live synchronization observations. Independent attract playback
 is startup/runtime evidence only. It is not a multiplayer test.
 
 Automated menu input was blocked by Windows Computer Use: two window-selection
 attempts returned `Computer Use native pipe is unavailable: failed to connect
 native pipe: The system cannot find the file specified. (os error 2)`.
 No alternate UI injection or public service was used. The runnable setup above
-remains available for manual verification; actual LAN racing, live loss/jitter
-behavior and Dreamcast cross-play remain unverified. The next required live
-step is the paired manual menu/connection/race check above.
+remained available for manual verification. The subsequent paired manual
+menu/connection/race check is recorded below.
+
+## Connected Windows verification — 2026-10-25
+
+The authoritative checkout was clean on `main` at `041dbcd`. A fresh UCRT64
+GCC development build completed successfully with the command above. No game
+or network implementation changes were needed. Both launcher-created executable
+copies matched the build's SHA-256:
+
+```text
+F82EA86464CD7753B07F7E0C85CFA90BFA4CD4C64533486E98C4F33250241CC6
+```
+
+The user operated the two game windows because the native Computer Use pipe
+was still unavailable. Both instances entered the offline lobby. `LAN_HOST`
+created the session on UDP 7847; `LAN_CLIENT` joined directly through
+`127.0.0.1`, was assigned slot 1, and appeared in the host's two-player session.
+Both players used Sonic on Resort Island.
+
+Paired development diagnostics confirmed:
+
+| Stage | Observed evidence |
+| --- | --- |
+| Offline lobby | Both logged `NetworkScreen: --lan, public matchmaking disabled` |
+| Join | Host logged slot 1 joining with `playerCount=2`; client logged `SLOT_ASSIGN slot=1` |
+| Race start | Host logged `START_GAME ack mask=0x3 (expected=0x3, retries=1)` |
+| Level barrier | Host sent `LEVEL_GO` after slot 1 became ready; client logged `received LEVEL_GO, entering race` |
+| State stream | Host logged player 1 speaking protocol 1; client logged player 0 speaking protocol 1 |
+
+Both processes reached `InitIsland`, `InitLevel OK` and `MAIN GAME LOOP`. The
+user confirmed independent movement in both directions for at least one minute:
+host movement appeared on the client and client movement appeared on the host,
+with no visible issues. Neither role's log contained a disconnect, timeout or
+error at the verification checkpoint; both owned processes and UDP endpoints
+remained active. Gameplay observations came from the user; automated inspection
+covered the paired logs and process/endpoint status.
+
+The original private runtime's 496 file paths, sizes and SHA-256 hashes were
+unchanged after the check. Neither prepared runtime contained root `ONLINE.DAT`.
+Raw logs, source-data hash manifests and local diagnostic evidence stayed
+outside Git; prepared runtime copies remain in the ignored session directory.
+
+Available checks also passed on this checkout: 140 codec cases, 615 transactional
+receive cases, 96 loss scenarios / 8,822 deliveries, and 5 interpolation tests.
+The launcher's PowerShell syntax and private-runtime ignore rules were checked.
+The loss suite remains synthetic production-logic coverage.
+
+This verifies a connected two-instance Windows race over loopback with manual
+bidirectional movement checks. Full-race finish/results, two-machine LAN play,
+broadcast discovery, live loss/jitter recovery and Dreamcast cross-play remain
+unverified.
