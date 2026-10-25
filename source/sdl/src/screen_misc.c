@@ -4879,6 +4879,7 @@ static void NetSynthPadKeys(void) { }
 
 int NetworkScreen(void)
 {
+    NetLobbyReset();
     /* Bring up the network stack (deferred from boot on DC). */
     if (platform_net_init() < 0) {
         DebugLog("NetworkScreen: platform_net_init failed\n");
@@ -5066,8 +5067,6 @@ int NetworkScreen(void)
 
     /* Clear lobby globals */
     ns_setupMode = 0;                                        /* [0x68AFD0] = 0 */
-    g_netSessionActive = 0;                                     /* [0x68AF18] = 0 */
-    g_netPlayerCount = 0;                                    /* [0x68AEE8] = 0 */
 
     /* Init network */
     IsDirectPlayAvailable();                                 /* 0x487CD8 */
@@ -5256,6 +5255,7 @@ int NetworkScreen(void)
 
             UpnpClosePort(NET_PORT_DEFAULT);
             MatchmakerClearSession();
+            if (g_screenResult != SCREEN_OK) CloseDirectPlaySession();
             return g_screenResult;                            /* 0x48AC1F: eax = [0x925418] */
         }
 
@@ -6192,11 +6192,10 @@ int NetworkScreenReentry(void)
 
     /* Debug log */
     DebugLog("NetworkScreenReentry\n");                      /* 0x48A8BF: push 0x5303CB */
+    NetLobbyReset();
 
     /* Clear lobby globals */
     ns_setupMode = 0;                                        /* [0x68AFD0] = 0 */
-    g_netSessionActive = 0;                                     /* [0x68AF18] = 0 */
-    g_netPlayerCount = 0;                                    /* [0x68AEE8] = 0 */
 
     /* Init network */
     IsDirectPlayAvailable();                                 /* 0x487CD8 */
@@ -6365,6 +6364,7 @@ int NetworkScreenReentry(void)
                 }
             }
 
+            if (g_screenResult != SCREEN_OK) CloseDirectPlaySession();
             return g_screenResult;                             /* 0x48AC1F: eax = [0x925418] */
         }
 

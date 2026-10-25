@@ -57,7 +57,9 @@ int ReadLocalInput(void) { CHECK(0); return 0; }
 #ifndef SONICR_TEST_REAL_TRANSPORT
 void platform_pump_events(void) { CHECK(0); }
 #endif
+#ifndef SONICR_TEST_LIFECYCLE
 const char *MatchmakerGetUsername(void) { CHECK(0); return ""; }
+#endif
 void DebugLog(char *fmt, ...) { (void)fmt; }
 uint32_t platform_get_time_ms(void) { return (uint32_t)now_ms; }
 void DeriveGroundState(Player *pl) { (void)pl; CHECK(0); }

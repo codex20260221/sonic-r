@@ -25,7 +25,9 @@ static void fixture_transport_reset(int is_host);
 #undef main
 
 static int real_mode;
+#ifndef SONICR_TEST_LIFECYCLE
 void platform_pump_events(void) { }
+#endif
 
 static void fixture_transport_reset(int is_host)
 {
@@ -680,6 +682,9 @@ static void test_disconnect_watchdogs(void)
     CHECK(!net_slot_is_connected(2) && g_netDisconnectFlag && g_fadeState == FADE_OUT); ++cases;
 }
 
+#ifdef SONICR_TEST_LIFECYCLE
+#define main authority_suite_main
+#endif
 int main(int argc, char **argv)
 {
     const char *which = argc > 1 ? argv[1] : "all";

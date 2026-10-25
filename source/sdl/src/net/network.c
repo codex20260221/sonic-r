@@ -1064,9 +1064,35 @@ void CloseDirectPlaySession(void)
     g_netGameStarted = 0;
 
     NetRecvThread_Stop();
+    QUEUE_LOCK();
+    s_queueHead = s_queueTail = 0;
+    QUEUE_UNLOCK();
     net_close();
-    NetInterpReset();
+    s_startAckMask = s_levelReadyMask = s_levelGoReceived = 0;
+    s_lastHostPacketMs = 0;
+    g_netSessionActive = g_netSessionAlive = g_netSyncEstablished = 0;
+    g_netExpectedPlayers = 0;
+    g_netReadyFlag = g_netReceivedLobbyData = 0;
+    g_netLobbyPlayerSlot = 0xFF;
+    memset(g_netPlayerRecvd, 0, sizeof(int) * NET_MAX_PLAYERS);
+    memset(g_netPlayerAlive, 0, sizeof(int) * NET_MAX_PLAYERS);
+    memset(s_playerRecvFlags, 0, sizeof(s_playerRecvFlags));
+    memset(s_netInputBuffer, 0, sizeof(s_netInputBuffer));
+    NetSnapshotReset();
+    /* Keep player/name/count data for the post-race results screen. It loses
+     * all authority above; a new lobby clears its presentation roster below. */
     DebugLog("Session Closed & Player Destroyed.\n");
+}
+
+void NetLobbyReset(void)
+{
+    CloseDirectPlaySession();
+    g_netPlayerCount = 0;
+    g_currentPlayerIdx = g_localPlayerIndex = 0;
+    memset(s_netSlotNames, 0, sizeof(s_netSlotNames));
+    memset(s_netSlotPlatform, 0, sizeof(s_netSlotPlatform));
+    memset(s_netSlotRegion, 0, sizeof(s_netSlotRegion));
+    memset(g_netPlayerDecorations, 0, NET_MAX_PLAYERS * NET_DECO_STRIDE);
 }
 
 /**

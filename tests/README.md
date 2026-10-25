@@ -216,6 +216,41 @@ exported production baselines. A 20-second child-process timeout detects
 stalled controls. See the [authority audit](../docs/network-authority-2026-10-25.md)
 for baseline failures, compatibility details and unverified risks.
 
+## Network session lifecycle
+
+```sh
+python tests/run_net_lifecycle.py --cc gcc
+```
+
+In an x64 MSVC developer environment with the existing UCRT64 prefix configured:
+
+```powershell
+python tests/run_net_lifecycle.py --cc cl --sanitize --ucrt64-dir "$env:MSYS2_UCRT64"
+```
+
+The 36 cases run the complete production `screen_misc.c` lobby loops and the
+session-creation code in `main.c`, with the actual transport, receiver thread
+and dispatch fixture. A simulated clock reaches the 180-second idle condition
+without waiting. Scripted input selects host/join, Esc or a normal race handoff.
+Graphics, audio, asset loading and online services are excluded; unexpected
+online calls fail. Every socket and datagram remains on loopback, using
+OS-assigned test ports through a test-only wrapper around the session API.
+
+Coverage includes both lobby entry points as host/client, eight complete
+timeout/recreation/start sequences, twelve resource cycles plus warm-up,
+stale queued JOIN rejection, idempotent teardown, real game/discovery socket
+closure, readiness reset and preservation of the post-race results roster.
+Windows resource cycles require a zero OS handle-count delta after warm-up.
+The PE linker uses aborting stubs for unrelated functions in the complete
+main/menu translation units. MSVC's temporary headers cover GNU attributes,
+winpthreads, `unistd` and unused command-line declarations. No production
+declarations or asset files are replaced.
+
+`--case timeout`, `escape`, `handoff`, `reset`, `recreate`, `queue` and `resources`
+isolate the scenarios. `--source`, `--transport-source`, `--lobby-source` and
+`--main-source` accept exported baselines; export all affected sources together.
+See the [lifecycle correction record](../docs/network-authority-2026-10-25.md#lifecycle-correction-after-live-verification).
+
 ## Loss, duplication and reordering
 
 ```sh

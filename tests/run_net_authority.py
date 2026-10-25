@@ -12,25 +12,33 @@ import tempfile
 REPO = Path(__file__).resolve().parents[1]
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(harness="authority"):
+    description = __doc__ if harness == "authority" else "Exercise real lobby exits and transport recreation without game assets."
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--cc", default=os.environ.get("CC", "gcc" if os.name == "nt" else "cc"))
     parser.add_argument("--source", type=Path, default=REPO / "source/sdl/src/net/network.c")
     parser.add_argument("--transport-source", type=Path, default=REPO / "source/sdl/src/net/net_transport.c")
+    if harness == "lifecycle":
+        parser.add_argument("--lobby-source", type=Path, default=REPO / "source/sdl/src/screen_misc.c")
+        parser.add_argument("--main-source", type=Path, default=REPO / "source/sdl/src/main.c")
     parser.add_argument("--case", default="all",
-                        choices=("all", "valid", "input", "snapshot", "control", "fields", "malformed",
-                                 "stale", "loopback", "crash", "barrier", "wait"))
+                        choices=(("all", "timeout", "escape", "handoff", "reset", "recreate", "queue", "resources") if harness == "lifecycle" else
+                                 ("all", "valid", "input", "snapshot", "control", "fields", "malformed",
+                                  "stale", "loopback", "crash", "barrier", "wait")))
     parser.add_argument("--sanitize", action="store_true")
     parser.add_argument("--ucrt64-dir", type=Path,
                         help="existing UCRT64 prefix for MSVC's pthread headers/import library; defaults to gcc on PATH")
     args = parser.parse_args()
-    with tempfile.TemporaryDirectory(prefix="sonicr-authority-") as temporary:
+    with tempfile.TemporaryDirectory(prefix=f"sonicr-{harness}-") as temporary:
         build = Path(temporary)
-        binary = build / ("authority.exe" if os.name == "nt" else "authority")
+        binary = build / (harness + (".exe" if os.name == "nt" else ""))
         msvc = Path(args.cc).name.lower() in ("cl", "cl.exe")
         definitions = ["SONICR_SDL",
                        'SONICR_TEST_NETWORK_SOURCE="' + args.source.resolve().as_posix() + '"',
                        'SONICR_TEST_TRANSPORT_SOURCE="' + args.transport_source.resolve().as_posix() + '"']
+        if harness == "lifecycle":
+            definitions += ['SONICR_TEST_LOBBY_SOURCE="' + args.lobby_source.resolve().as_posix() + '"',
+                            'SONICR_TEST_MAIN_SOURCE="' + args.main_source.resolve().as_posix() + '"']
         if ("int net_recv_packet(" in args.transport_source.read_text(encoding="utf-8") and
                 "pkt->generation" in args.source.read_text(encoding="utf-8")):
             definitions += ["SONICR_TEST_GENERATIONS"]
@@ -51,6 +59,14 @@ def main():
             (build / "unistd.h").write_text('#pragma once\n#include <windows.h>\n'
                                            'static int usleep(unsigned usec) { Sleep((usec + 999) / 1000); return 0; }\n',
                                            encoding="utf-8")
+            if harness == "lifecycle":
+                with (build / "unistd.h").open("a", encoding="utf-8") as header:
+                    header.write('#include <direct.h>\n#define chdir _chdir\n')
+                (build / "getopt.h").write_text('struct option { const char *name; int has_arg; int *flag; int val; };\n'
+                                              'enum { no_argument, required_argument, optional_argument };\n'
+                                              'extern char *optarg; extern int optind;\n'
+                                              'int getopt_long(int, char *const *, const char *, const struct option *, int *);\n',
+                                              encoding="utf-8")
             definitions += ["_CRT_SECURE_NO_WARNINGS", "_WINSOCK_DEPRECATED_NO_WARNINGS", "WINPTHREADS_USE_DLLIMPORT"]
             command = [args.cc, "/nologo", "/std:c11", "/W3", "/WX", "/O1", "/Gy", "/Gw",
                        "/I" + str(build), "/I" + str(REPO / "source/sdl/src"),
@@ -69,17 +85,29 @@ def main():
             if args.sanitize:
                 command += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
         command += shlex.split(os.environ.get("CFLAGS", ""))
-        command += [str(REPO / "tests/test_net_authority.c"),
+        command += [str(REPO / f"tests/test_net_{harness}.c"),
                     str(REPO / "source/sdl/src/net/net_delta.c"),
                     str(REPO / "source/sdl/src/globals.c"),
                     str(REPO / "source/sdl/src/globals_extra.c")]
+        if harness == "lifecycle":
+            command += [str(REPO / "tests/net_lifecycle_lobby.c"), str(REPO / "tests/net_lifecycle_main.c")]
+            if not msvc:
+                # Same suppression as the desktop build for unrelated credits
+                # rendering in the complete screen_misc translation unit.
+                command += ["-Wno-maybe-uninitialized"]
+            if os.name == "nt":
+                command += [str(REPO / "tests/net_lifecycle_unused.c")]
         if msvc:
             command += ["/link", "/OPT:REF", "/INCREMENTAL:NO", "ws2_32.lib", "iphlpapi.lib",
                         str(prefix / "lib/libwinpthread.dll.a")]
+            if harness == "lifecycle":
+                command += ["winmm.lib"]
         else:
             command += ["-Wl,-dead_strip" if sys.platform == "darwin" else "-Wl,--gc-sections", "-o", str(binary)]
         if os.name == "nt" and not msvc:
             command += ["-lws2_32", "-liphlpapi"]
+            if harness == "lifecycle":
+                command += ["-lwinmm"]
         command += shlex.split(os.environ.get("LDFLAGS", ""))
         subprocess.run(command, cwd=build, check=True)
         environment = os.environ.copy()
@@ -89,7 +117,7 @@ def main():
             result = subprocess.run([str(binary), args.case], cwd=build, text=True, capture_output=True,
                                     encoding="utf-8", errors="replace", timeout=20, env=environment)
         except subprocess.TimeoutExpired:
-            raise SystemExit(f"network authority: {args.case} timed out (20 seconds)")
+            raise SystemExit(f"network {harness}: {args.case} timed out (20 seconds)")
         print(result.stdout, end="")
         if result.returncode:
             print(result.stderr[-16000:], file=sys.stderr, end="")

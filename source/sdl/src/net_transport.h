@@ -155,6 +155,10 @@ static inline void net_platform_icon_uv(int icon, int *uvX, int *uvY)
  */
 int net_transport_init(void);
 
+/* Enter a fresh lobby after any previous race/results screen. Retires the
+ * old transport and clears lobby identities, without changing saved options. */
+void NetLobbyReset(void);
+
 /**
  * Host: bind a UDP socket on the given port and begin accepting clients.
  * Returns 0 on success, -1 on failure.

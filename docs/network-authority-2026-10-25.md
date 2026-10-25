@@ -235,8 +235,8 @@ another slot. START and the loading barrier wait for the retained endpoint too.
 The relevant timeout/menu paths predate `c531071`; this run establishes the
 failure in `c531071`, without an older-build gameplay comparison.
 
-Broad session-lifecycle resilience is **not closed**. The immediate follow-up
-is to close abandoned lobby sessions consistently, preserve the successful
+At this verification checkpoint, session-lifecycle resilience was **not closed**.
+The immediate follow-up was to close abandoned lobby sessions consistently, preserve the successful
 lobby-to-race handoff, and add a timeout/re-entry regression before repeating
 this live scenario. The clean LEAVE/rejoin path and normal completed race are
 verified separately from this failed path. No production fix was made during
@@ -256,6 +256,102 @@ previous automated results above remain the evidence for packet rejection and
 authority checks; this live run used legitimate traffic and does not prove
 spoofing resistance or downstream field safety. The Windows build currency
 check passed. No game assets or production source were modified.
+
+## Lifecycle correction after live verification
+
+The correction starts from `b3c7945`, with the same production implementation
+as the failed live run. The first lifecycle tests were executed against that
+unchanged implementation before any production changes.
+
+### Deterministic reproduction and state ownership
+
+The fixture executes the complete production `NetworkScreen()` and
+`NetworkScreenReentry()` loops, the session API in `main.c`, and the real
+transport/receiver. Only platform input/time, asset loading, graphics/audio and
+online service boundaries are replaced. All UDP binds and sends are loopback;
+the session API's fixed port is redirected to OS-assigned test ports.
+
+Baseline observations were:
+
+- A client timeout returned `SCREEN_TITLE` with the transport still active.
+- Host timeout followed by actual menu recreation and a new client endpoint
+  produced `slot=2`, `players=3`, expected readiness `0x7`, actual `0x5`.
+- Explicit close left ACK mask `0xf`, READY mask `0xf`, GO set, and a queued
+  JOIN present. Esc and successful race handoff cases passed on the baseline.
+
+The primary defect was a split lifecycle: the idle fade returned from the
+lobby without closing its socket or receiver thread. Endpoint registrations,
+their generations and the open lobby's admission state survived. Re-entry
+reset `g_netPlayerCount`; `net_host_start()` correctly reused its already active
+listener, but that listener still owned the old client slot. A new endpoint
+then received slot 2. START reset its ACK mask but expected all three slots,
+including the retained participant; loading could not complete.
+
+The teardown test also established that stopping the transport alone did not
+clear application readiness/queued control state. Some roster data must survive
+ordinary race closure because `main.c` closes the network before showing the
+results screen. Clearing every player/name/count field at close would change
+that existing behavior.
+
+### Correction and compatibility
+
+- Both lobby entry points call `NetLobbyReset()`. It retires any previous
+  transport and receiver, then clears local lobby identities and the player
+  count before starting a new lobby. Saved selections and original data are
+  preserved.
+- Both common fade-return paths close the session for results other than
+  `SCREEN_OK`, covering idle timeout and cancellation. A successful handoff
+  keeps its listener, peers, receiver and session state for the race.
+- `CloseDirectPlaySession()` stops and joins the receiver before clearing the
+  packet queue, closes the game/discovery sockets, invalidates endpoint
+  associations, and resets readiness, ACK/GO flags, pending lobby controls,
+  receive/input flags, timestamps, expected-player count and codec/interpolation
+  history. Repeating close is safe. An assigned client still sends its existing
+  best-effort LEAVE before teardown.
+- Player data and the results roster remain available after race closure;
+  the next lobby clears those identity caches. The roster preservation check
+  compares player bytes, names, decorations and player count across close.
+
+The transport's idempotent start behavior, packet formats, protocol version,
+normal LEAVE/rejoin, and the original 180-second idle policy are unchanged.
+No decoded physics/animation code or name-rendering behavior was modified.
+The blank local host name and delayed lobby names remain separate issues.
+
+### Verification and live retest status
+
+| Check | Result |
+| --- | --- |
+| Lifecycle suite, GCC | 36 cases pass |
+| Lifecycle suite, native MSVC AddressSanitizer | 36 cases pass; no sanitizer diagnostics |
+| Repeated timeout/recreation/start | Eight sequences pass; new client always slot 1, player count 2, ACK/READY masks `0x3`, GO received |
+| Resource lifetime | Twelve cycles plus warm-up; zero Windows OS handle growth, receiver stopped, sockets closed, slots freed |
+| Old queued JOIN / obsolete controls | Rejected or cleared across recreation; old generation cannot authorize the new slot owner |
+| Results roster and successful handoff | Preserved in both production lobby loops |
+| Existing authority suite, GCC and native MSVC ASan | 626 cases pass on each |
+| GCC authority suite with `-fanalyzer` | Pass; no analyzer diagnostics |
+| Existing receive / codec / interpolation | 615 / 140 / 5 pass |
+| Existing loss/reordering | 96 scenarios, 8,822 deliveries pass; fingerprint remains `066e265228162286` |
+| Fresh Windows development build | Pass in `build/lifecycle-verification` |
+
+Commands and fixture boundaries are in [tests/README.md](../tests/README.md#network-session-lifecycle).
+To reproduce the pre-fix failures, export `net/network.c`, `net/net_transport.c`,
+`screen_misc.c` and `main.c` from `b3c7945` into an external directory, then pass
+their paths through the four source options. `--case recreate` and `--case reset`
+deliberately fail on that baseline without game assets or a wall-clock idle wait.
+
+The deterministic defect is corrected. A live retest with the corrected Windows
+executable is the remaining verification step: clean leave/rejoin, host idle
+timeout, host recreation, client rejoin as slot 1 with exactly two players,
+then READY/GO and a complete race. Runtime results will be recorded separately
+from the synthetic cases.
+
+The current protocol has no host-shutdown control or session nonce. A client
+can remain in its waiting lobby until its own timeout or an explicit leave;
+this correction makes those exits release its local resources. Arbitrarily
+delayed wire packets from an identical reused endpoint, and an established
+peer that never reports level-ready, remain separate limitations. General
+loading-barrier deadlines, full leak analysis and exhaustive thread interleavings
+are not claimed. Other operating systems and Dreamcast were not run.
 
 ## Candidates for the downstream decoded-field audit
 
